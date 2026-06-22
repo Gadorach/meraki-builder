@@ -131,6 +131,36 @@ int main(void) {
   json_object_put(invalid);
   json_object_put(statik);
   json_object_put(dhcp);
+
+  /* /etc/resolv.conf rendering from the active DNS servers. */
+  char resolv[256];
+  snprintf(resolv, sizeof(resolv), "%s/resolv.conf", dir);
+  setenv("CONFIGD_RESOLV_CONF", resolv, 1);
+  unlink(resolv);
+
+  struct ipv4_runtime dns_value = {0};
+  snprintf(dns_value.dns[0], sizeof(dns_value.dns[0]), "192.168.4.1");
+  snprintf(dns_value.dns[1], sizeof(dns_value.dns[1]), "1.1.1.1");
+  assert(network_render_resolv_conf(&dns_value) == 0);
+  FILE *rf = fopen(resolv, "r");
+  assert(rf);
+  char body[256];
+  size_t got = fread(body, 1, sizeof(body) - 1, rf);
+  fclose(rf);
+  body[got] = '\0';
+  assert(strstr(body, "nameserver 192.168.4.1\n"));
+  assert(strstr(body, "nameserver 1.1.1.1\n"));
+
+  /* A value with no DNS servers must not wipe the existing resolver. */
+  struct ipv4_runtime empty_value = {0};
+  assert(network_render_resolv_conf(&empty_value) == 0);
+  rf = fopen(resolv, "r");
+  assert(rf);
+  got = fread(body, 1, sizeof(body) - 1, rf);
+  fclose(rf);
+  body[got] = '\0';
+  assert(strstr(body, "nameserver 192.168.4.1\n"));
+
   puts("network tests passed");
   return 0;
 }
