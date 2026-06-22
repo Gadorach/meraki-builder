@@ -15,6 +15,7 @@
 #include "time_ops.h"
 #include "json_util.h"
 #include "socket_io.h"
+#include "ssh_keys.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -238,6 +239,14 @@ static void handle_client(int fd) {
   } else if (!strcmp(type, "users.role")) {
     struct json_object *data=request_data(request);const char *target=object_string(data,"username"),*new_role=object_string(data,"role");
     if(!role_has_capability(role,"users.manage"))send_error(fd,403,"account management requires administrator access");else{char error[256]={0};if(auth_set_role(target,new_role,error,sizeof(error))!=0)send_error(fd,400,error);else{struct json_object *users=auth_list_users();send_json(fd,"users",users);json_object_put(users);}}
+  } else if (!strcmp(type, "ssh.keys.get") && role_has_capability(role, "users.manage")) {
+    struct json_object *keys=ssh_keys_list();send_json(fd,"ssh_keys",keys);json_object_put(keys);
+  } else if (!strcmp(type, "ssh.keys.add")) {
+    struct json_object *data=request_data(request);const char *label=object_string(data,"label"),*key=object_string(data,"key");
+    if(!role_has_capability(role,"users.manage"))send_error(fd,403,"managing SSH keys requires administrator access");else{char error[256]={0};if(ssh_keys_add(label,key,error,sizeof(error))!=0)send_error(fd,400,error);else{struct json_object *keys=ssh_keys_list();send_json(fd,"ssh_keys",keys);json_object_put(keys);}}
+  } else if (!strcmp(type, "ssh.keys.remove")) {
+    struct json_object *data=request_data(request);const char *key=object_string(data,"key");
+    if(!role_has_capability(role,"users.manage"))send_error(fd,403,"managing SSH keys requires administrator access");else{char error[256]={0};if(ssh_keys_remove(key,error,sizeof(error))!=0)send_error(fd,400,error);else{struct json_object *keys=ssh_keys_list();send_json(fd,"ssh_keys",keys);json_object_put(keys);}}
   } else if (!strcmp(type, "services.get") && role_has_capability(role, "status.read")) {
     struct json_object *status = service_status_json();
     send_json(fd, "services", status); json_object_put(status);
