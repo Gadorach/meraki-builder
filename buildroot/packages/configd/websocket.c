@@ -638,6 +638,11 @@ static int replace_configuration(struct json_object *candidate,
   const struct network_runtime *after = network_manager_runtime();
   if (rc == 0 && management_address_changed(&before, after))
     rebind_management_services(&before, after);
+  if (rc == 0) {
+    char ssh_error[200] = {0};
+    if (ssh_keys_render(ssh_error, sizeof(ssh_error)) != 0)
+      apply_result_warn(result, "authorized_keys render failed: %s", ssh_error);
+  }
   return rc;
 }
 
