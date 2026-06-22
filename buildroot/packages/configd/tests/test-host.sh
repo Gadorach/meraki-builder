@@ -58,6 +58,15 @@ cc -std=gnu11 -Wall -Wextra -Werror -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE 
   "$HERE/test_service_ops.c" "$PKG/service_ops.c" $(pkg-config --libs json-c)
 "$SERVICE_OUT"
 
+SSH_KEYS_OUT=${TMPDIR:-/tmp}/configd-test-ssh-keys
+cc -std=gnu11 -Wall -Wextra -Werror -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE \
+  -I"$PKG" -I"$PKG/../postmerkos" -I"$PKG/../pd690xx" \
+  $(pkg-config --cflags json-c) -o "$SSH_KEYS_OUT" \
+  "$HERE/test_ssh_keys.c" "$PKG/ssh_keys.c" "$PKG/config_file.c" \
+  "$PKG/json_util.c" "$PKG/../postmerkos/libpostmerkos.c" \
+  $(pkg-config --libs json-c)
+"$SSH_KEYS_OUT"
+
 HEALTH_OUT=${TMPDIR:-/tmp}/postmerkosctl-test-health
 cc -std=gnu11 -Wall -Wextra -Werror -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE \
   -I"$PKG" $(pkg-config --cflags json-c) -o "$HEALTH_OUT" \
