@@ -10,6 +10,7 @@
 #include "result.h"
 #include "roles.h"
 #include "release.h"
+#include "ssh_keys.h"
 #include "status.h"
 #include "system_ops.h"
 #include "service_ops.h"
@@ -770,6 +771,47 @@ static int handle_request(struct lws *wsi, struct per_session_data *session,
     struct json_object *data=request_data_object(message);const char *username=object_string(data,"username"),*role=object_string(data,"role");char error[256]={0};
     if(auth_set_role(username,role,error,sizeof(error))!=0){queue_bad_request(wsi,session,request_id,error);return 0;}
     struct json_object *reply=json_object_new_object();json_object_object_add(reply,"message",json_object_new_string("Account role updated"));json_object_object_add(reply,"users",auth_list_users());queue_response(wsi,session,"users",reply,request_id);json_object_put(reply);return 0;
+  }
+  if (!strcmp(type, "ssh_key_list")) {
+    if (!require_capability(wsi, session, request_id, "users.manage")) return 0;
+    struct json_object *data = json_object_new_object();
+    json_object_object_add(data, "keys", ssh_keys_list());
+    queue_response(wsi, session, "ssh_keys", data, request_id);
+    json_object_put(data);
+    return 0;
+  }
+  if (!strcmp(type, "ssh_key_add")) {
+    if (!require_capability(wsi, session, request_id, "users.manage")) return 0;
+    struct json_object *data = request_data_object(message);
+    const char *label = object_string(data, "label");
+    const char *key = object_string(data, "key");
+    char error[256] = {0};
+    if (ssh_keys_add(label, key, error, sizeof(error)) != 0) {
+      queue_bad_request(wsi, session, request_id, error);
+      return 0;
+    }
+    struct json_object *reply = json_object_new_object();
+    json_object_object_add(reply, "message", json_object_new_string("Key added"));
+    json_object_object_add(reply, "keys", ssh_keys_list());
+    queue_response(wsi, session, "ssh_keys", reply, request_id);
+    json_object_put(reply);
+    return 0;
+  }
+  if (!strcmp(type, "ssh_key_remove")) {
+    if (!require_capability(wsi, session, request_id, "users.manage")) return 0;
+    struct json_object *data = request_data_object(message);
+    const char *key = object_string(data, "key");
+    char error[256] = {0};
+    if (ssh_keys_remove(key, error, sizeof(error)) != 0) {
+      queue_bad_request(wsi, session, request_id, error);
+      return 0;
+    }
+    struct json_object *reply = json_object_new_object();
+    json_object_object_add(reply, "message", json_object_new_string("Key removed"));
+    json_object_object_add(reply, "keys", ssh_keys_list());
+    queue_response(wsi, session, "ssh_keys", reply, request_id);
+    json_object_put(reply);
+    return 0;
   }
 
   if (!strcmp(type, "password_change")) {
