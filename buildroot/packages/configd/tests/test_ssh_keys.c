@@ -54,6 +54,46 @@ int main(void) {
   assert(ssh_key_identity("ssh-ed25519 AAAAC3NzaC1lZDI1", tiny,
                           sizeof(tiny)) != 0);
 
+  /* render + add/remove round trip through a temp switch.json */
+  setenv("CONFIGD_SSH_DIR", "/tmp/configd-ssh-test-dir", 1);
+  setenv("CONFIGD_AUTHORIZED_KEYS",
+         "/tmp/configd-ssh-test-dir/authorized_keys", 1);
+  system("rm -rf /tmp/configd-ssh-test-dir /tmp/configd-ssh-test.json");
+
+  const char *k1 = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILhRkE7g one";
+  const char *k2 = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAB two";
+  assert(ssh_keys_add("first", k1, err, sizeof(err)) == 0);
+  assert(ssh_keys_add("second", k2, err, sizeof(err)) == 0);
+  /* duplicate identity (same key, different comment/label) is rejected */
+  assert(ssh_keys_add("dup",
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILhRkE7g other", err,
+    sizeof(err)) != 0);
+
+  struct json_object *list = ssh_keys_list();
+  assert(json_object_array_length(list) == 2);
+  json_object_put(list);
+
+  /* rendered file exists, 0600, contains both keys, dir is 0700 */
+  FILE *rf = fopen("/tmp/configd-ssh-test-dir/authorized_keys", "r");
+  assert(rf);
+  char buf[1024]; size_t got = fread(buf, 1, sizeof(buf) - 1, rf); fclose(rf);
+  buf[got] = '\0';
+  assert(strstr(buf, k1) && strstr(buf, k2));
+  struct stat st;
+  assert(stat("/tmp/configd-ssh-test-dir/authorized_keys", &st) == 0);
+  assert((st.st_mode & 0777) == 0600);
+  assert(stat("/tmp/configd-ssh-test-dir", &st) == 0);
+  assert((st.st_mode & 0777) == 0700);
+
+  /* remove one, file updates */
+  assert(ssh_keys_remove(k1, err, sizeof(err)) == 0);
+  list = ssh_keys_list();
+  assert(json_object_array_length(list) == 1);
+  json_object_put(list);
+  rf = fopen("/tmp/configd-ssh-test-dir/authorized_keys", "r");
+  assert(rf); got = fread(buf, 1, sizeof(buf) - 1, rf); fclose(rf); buf[got] = '\0';
+  assert(!strstr(buf, k1) && strstr(buf, k2));
+
   puts("ssh_keys validation tests passed");
   return 0;
 }
