@@ -1,6 +1,7 @@
 #include "validation.h"
 #include "configd.h"
 #include "network.h"
+#include "ssh_keys.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -309,15 +310,50 @@ static int validate_globals(struct json_object *config,
   return 0;
 }
 
+static int validate_ssh_schema(struct json_object *config,
+                               char *error, size_t error_size) {
+  struct json_object *ssh = NULL;
+  if (!json_object_object_get_ex(config, "ssh", &ssh)) return 0;
+  if (!json_object_is_type(ssh, json_type_object))
+    return bad(error, error_size, "ssh must be an object");
+  const char *ssh_keys[] = {"authorized_keys"};
+  if (reject_unknown(ssh, ssh_keys, 1, "ssh", error, error_size) != 0)
+    return -EINVAL;
+  struct json_object *arr = NULL;
+  if (!json_object_object_get_ex(ssh, "authorized_keys", &arr)) return 0;
+  if (!json_object_is_type(arr, json_type_array))
+    return bad(error, error_size, "ssh.authorized_keys must be an array");
+  for (size_t i = 0; i < json_object_array_length(arr); i++) {
+    struct json_object *e = json_object_array_get_idx(arr, i), *jk = NULL, *jl = NULL;
+    if (!json_object_is_type(e, json_type_object))
+      return bad(error, error_size, "ssh.authorized_keys entries must be objects");
+    const char *entry_keys[] = {"label", "key"};
+    if (reject_unknown(e, entry_keys, 2, "ssh.authorized_keys[]",
+                       error, error_size) != 0) return -EINVAL;
+    if (json_object_object_get_ex(e, "label", &jl) &&
+        !json_object_is_type(jl, json_type_string))
+      return bad(error, error_size, "ssh.authorized_keys[].label must be a string");
+    if (!json_object_object_get_ex(e, "key", &jk) ||
+        !json_object_is_type(jk, json_type_string))
+      return bad(error, error_size, "ssh.authorized_keys[].key must be a string");
+    char key_error[200];
+    if (ssh_key_validate(json_object_get_string(jk), key_error,
+                         sizeof(key_error)) != 0)
+      return bad(error, error_size, key_error);
+  }
+  return 0;
+}
+
 int validate_configuration(struct json_object *config,
                            char *error, size_t error_size) {
   if (!config || !json_object_is_type(config, json_type_object))
     return bad(error, error_size, "configuration must be a JSON object");
-  const char *keys[] = {"network", "ports", "stp", "lacp", "multicast"};
-  if (reject_unknown(config, keys, 5, "configuration",
+  const char *keys[] = {"network", "ports", "stp", "lacp", "multicast", "ssh"};
+  if (reject_unknown(config, keys, 6, "configuration",
                      error, error_size) != 0) return -EINVAL;
   if (validate_network_schema(config, error, error_size) != 0 ||
       validate_ports(config, error, error_size) != 0 ||
-      validate_globals(config, error, error_size) != 0) return -EINVAL;
+      validate_globals(config, error, error_size) != 0 ||
+      validate_ssh_schema(config, error, error_size) != 0) return -EINVAL;
   return 0;
 }
