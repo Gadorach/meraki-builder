@@ -10,9 +10,11 @@ from urllib.parse import unquote
 LINK = re.compile(r"(?<!!)\[[^\]]*\]\(([^)]+)\)")
 SKIP_PREFIXES = ("http://", "https://", "mailto:", "ftp://", "data:")
 HISTORY_PARTS = {"history", "research"}
-STALE = re.compile(
-    r"\b(no longer needed|this is no longer|old path|old build path|obsolete workflow|"
-    r"previously required|before firmware [0-9])\b",
+HISTORICAL_CHANGE_NARRATIVE = re.compile(
+    r"\b(?:previous implementation|earlier implementation|old implementation|"
+    r"previous release|earlier release|old release|formerly|historically|"
+    r"was fixed|now fixed|regression fix|bug fix|hotfix|workaround|"
+    r"superseded implementation|migration-only instruction|transitional build note)\b",
     re.IGNORECASE,
 )
 
@@ -39,10 +41,13 @@ def check(root: pathlib.Path) -> list[str]:
             if not resolved.exists():
                 errors.append(f"{doc.relative_to(root)}: broken link: {raw}")
         rel_parts = set(doc.relative_to(root).parts)
-        if doc.name.lower() == "readme.md" and not (rel_parts & HISTORY_PARTS):
-            for match in STALE.finditer(text):
+        if not (rel_parts & HISTORY_PARTS):
+            for match in HISTORICAL_CHANGE_NARRATIVE.finditer(text):
                 line = text.count("\n", 0, match.start()) + 1
-                errors.append(f"{doc.relative_to(root)}:{line}: stale implementation wording: {match.group(0)}")
+                errors.append(
+                    f"{doc.relative_to(root)}:{line}: historical change narrative in active documentation: "
+                    f"{match.group(0)}"
+                )
     return errors
 
 def main() -> int:
@@ -55,7 +60,7 @@ def main() -> int:
     if errors:
         print("\n".join(errors), file=sys.stderr)
         return 1
-    print("Documentation links and active README wording are valid.")
+    print("Documentation links and active current-state wording are valid.")
     return 0
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@ This doc describes how a postmerkos switch is configured.
 
 The underlying interface is a filesystem mounted at `/click`.
 
-> **TODO**: are there any docs we can reference?
+> Current Click handling is documented in [`docs/architecture/click-system.md`](../architecture/click-system.md) and current configuration handling is documented in [`docs/architecture/configd.md`](../architecture/configd.md).
 
 If you're developing code to run directly on the switch, you may need to go through `click`.
 All I can say is: search the repo for some examples.

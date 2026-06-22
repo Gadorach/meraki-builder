@@ -15,11 +15,19 @@ Configd is the always-running privileged management core for postmerkOS. It owns
 - Local Unix socket: `/run/postmerkos/configd.sock`
 - Optional authenticated WebSocket frontend on port 4001
 
-Desired configuration is persistent state; status is observed state and may omit unavailable hardware. Invalid requests never replace the saved configuration. Missing Click handlers and transient hardware reads become structured warnings rather than daemon termination.
+Desired configuration is persistent state; status is observed state and may omit unavailable hardware. Invalid requests never replace the saved configuration. Required Click, PoE, network, and service operations are applied before persistence; a required failure rejects the transaction and attempts runtime rollback. Only explicitly optional or unreadable status paths become structured warnings.
 
 ## Interfaces
 
-The local socket is used by `postmerkosctl` and the role-aware console. Web builds additionally compile the WebSocket, authentication, terminal, and firmware-upload frontend. Both paths use the same operation handlers and capability checks.
+The local socket is used by `postmerkosctl` and the role-aware console. Peer identity is resolved once from `SO_PEERCRED`; UID 0 is always administrator, and passwd/group data is copied into owned buffers rather than retained from libc static lookup storage. Web builds additionally compile the WebSocket, authentication, terminal, and firmware-upload frontend. Both paths use the same operation handlers and capability checks.
+
+Runtime feature discovery is available with:
+
+```sh
+configd --features
+```
+
+A web build reports the `configd-ws` subprotocol and port 4001. Its init script requires the Unix socket, a valid root session request, an actual WebSocket upgrade, `configd-ws` subprotocol selection, and a protocol-2 `hello` response before declaring configd ready.
 
 One-shot recovery/automation examples:
 
@@ -33,9 +41,11 @@ configd --set-string ports.1.name uplink
 configd --validate /tmp/switch.json
 configd --replace-file /tmp/switch.json
 configd --network-bootstrap --network-wait 60
+configd --network-bootstrap --boot-output --network-wait 60
+postmerkosctl management-health
 ```
 
-Responses are JSON envelopes with `ack`, `error`, or operation-specific types. See [the protocol](docs/PROTOCOL.md).
+Responses are JSON envelopes with `ack`, `error`, or operation-specific types. An unauthenticated WebSocket may use only `hello`, `ping`, `auth`, and `logout`; all status and management operations require a resolved role. See [the protocol](docs/PROTOCOL.md).
 
 ## Configuration
 
@@ -69,7 +79,14 @@ The core links JSON-C, `libpostmerkos`, and `libpd690xx`. Console-only builds co
 Run:
 
 ```sh
+make -C buildroot/packages/configd ENABLE_WEBSOCKET=0
 make -C buildroot/packages/configd test-host
 ```
 
+The host suite includes repeated root/admin/operator/viewer lookups to catch account-storage corruption and role instability.
+
 Module responsibilities are documented under [docs/modules](docs/modules/README.md). The Click graph is documented in [the repository architecture guide](../../../docs/architecture/click-system.md).
+
+## Diagnostics
+
+Boot-oriented network output is concise and the complete envelope is retained in `/run/postmerkos/network-bootstrap.json`. Daemon termination is recorded in `/run/postmerkos/configd.exit` with reason, exit status, timestamp, and uptime. `S15configd` uses a bounded supervisor; repeated failures remain visible on the hardware console and in `/run/postmerkos/configd.log`.

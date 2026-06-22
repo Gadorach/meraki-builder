@@ -168,7 +168,7 @@ struct json_object *click_read_ports(struct apply_result *result) {
 }
 
 static int write_handler(unsigned int port, const char *handler,
-                         const char *field, const char *command,
+                         const char *field, const char *command, bool required,
                          struct apply_result *result) {
   log_change(port, field, command);
   if (dry_run) {
@@ -177,9 +177,13 @@ static int write_handler(unsigned int port, const char *handler,
   }
   int rc = write_switch_port_table(handler, command);
   if (rc != 0) {
-    apply_result_warn(result, "port %u %s failed: %s", port, field,
-                      strerror(-rc));
-    return rc;
+    if (required)
+      apply_result_fail(result, "port %u %s failed: %s", port, field,
+                        strerror(-rc));
+    else
+      apply_result_warn(result, "port %u %s unavailable: %s", port, field,
+                        strerror(-rc));
+    return required ? rc : 0;
   }
   apply_result_applied(result);
   return 0;
@@ -200,7 +204,7 @@ static int apply_phy(unsigned int port, struct json_object *port_config,
            "PORT %u, FC_OBEY %s, EEE_ADV_ENABLED %s, MODE %s",
            port, flow_control ? "true" : "false",
            eee ? "true" : "false", mode);
-  return write_handler(port, "set_port_phy_cfgs", "phy", command, result);
+  return write_handler(port, "set_port_phy_cfgs", "phy", command, true, result);
 }
 
 static int apply_storm(unsigned int port, struct json_object *port_config,
@@ -211,7 +215,7 @@ static int apply_storm(unsigned int port, struct json_object *port_config,
   snprintf(command, sizeof(command), "PORT %u, ENABLED %s", port,
            enabled ? "true" : "false");
   return write_handler(port, "set_port_storm_control", "storm_control",
-                       command, result);
+                       command, false, result);
 }
 
 static int apply_vlan(unsigned int port, struct json_object *port_config,
@@ -240,13 +244,13 @@ static int apply_vlan(unsigned int port, struct json_object *port_config,
       port, allowed, tagged ? "true" : "false",
       ingress ? "true" : "false", pvid, untagged);
   return write_handler(port, "set_vlan_allports_conf", "vlan", command,
-                       result);
+                       true, result);
 }
 
 static int apply_stp(unsigned int port, struct json_object *port_config,
                      struct apply_result *result) {
   if (!meraki_mac[0]) {
-    apply_result_warn(result, "port %u STP skipped: switch MAC unavailable", port);
+    apply_result_fail(result, "port %u STP failed: switch MAC unavailable", port);
     return -ENOENT;
   }
   struct json_object *stp = json_object_object_get(port_config, "stp");
@@ -265,7 +269,7 @@ static int apply_stp(unsigned int port, struct json_object *port_config,
       priority, cost);
   log_change(port, "stp", command);
   int rc = dry_run ? 0 : click_write("/click/stp/set_many_port_cfgs", command);
-  if (rc != 0) apply_result_warn(result, "port %u STP failed: %s", port,
+  if (rc != 0) apply_result_fail(result, "port %u STP failed: %s", port,
                                  strerror(-rc));
   else apply_result_applied(result);
   return rc;
@@ -275,8 +279,8 @@ static int apply_poe(unsigned int port, struct json_object *port_config,
                      struct apply_result *result) {
   if (!hardware_port_supports_poe(&hardware, port)) return 0;
   if (!hardware.poe_available) {
-    apply_result_warn(result,
-        "port %u PoE desired state retained; controller unavailable", port);
+    apply_result_fail(result,
+        "port %u PoE failed: controller unavailable", port);
     return -ENODEV;
   }
   struct json_object *poe = json_object_object_get(port_config, "poe");
@@ -287,7 +291,7 @@ static int apply_poe(unsigned int port, struct json_object *port_config,
   log_change(port, "poe.mode", mode);
   int rc = dry_run ? 0 : port_set_type(&pd690xx, (int)port, desired_mode);
   if (rc != 0) {
-    apply_result_warn(result, "port %u PoE mode %s failed", port, mode);
+    apply_result_fail(result, "port %u PoE mode %s failed", port, mode);
   } else {
     apply_result_applied(result);
   }
@@ -297,7 +301,7 @@ static int apply_poe(unsigned int port, struct json_object *port_config,
       (enabled ? port_enable(&pd690xx, (int)port)
                : port_disable(&pd690xx, (int)port));
   if (enabled_rc != 0)
-    apply_result_warn(result, "port %u PoE %s failed", port,
+    apply_result_fail(result, "port %u PoE %s failed", port,
                       enabled ? "enable" : "disable");
   else
     apply_result_applied(result);
@@ -334,7 +338,8 @@ static int apply_port_fields(unsigned int port,
     for (size_t j = 0; j < applied_count; j++)
       if (applied[j] == fields[i].apply) duplicate = true;
     if (duplicate) continue;
-    fields[i].apply(port, full_port, result);
+    int rc = fields[i].apply(port, full_port, result);
+    if (rc != 0) return rc;
     applied[applied_count++] = fields[i].apply;
   }
   return 0;
@@ -354,7 +359,9 @@ static int apply_ports(struct json_object *full_config,
     struct json_object *full_port = NULL;
     if (!json_object_object_get_ex(full_ports, key, &full_port)) continue;
     unsigned int port = (unsigned int)strtoul(key, NULL, 10);
-    apply_port_fields(port, full_port, delta ? changed_port : NULL, result);
+    int rc = apply_port_fields(port, full_port,
+                               delta ? changed_port : NULL, result);
+    if (rc != 0) return rc;
   }
   return 0;
 }

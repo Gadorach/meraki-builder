@@ -12,3 +12,5 @@ else
 fi
 
 git -C "$SWITCH_DIR" rev-parse HEAD > "$ARTIFACTS_DIR/kernel-source-revision.txt"
+
+"$SCRIPT_DIR/prepare-loader-source.sh"

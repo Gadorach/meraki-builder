@@ -29,5 +29,5 @@ if data[0x20000:0x20004] != bytes.fromhex("27051956"):
 if data[0x400000:0x400004] != bytes.fromhex("27051956"):
     fail("initramfs uImage magic is missing at 0x400000")
 if len(data) > 0x1900000:
-    fail(f"image exceeds the historical MX80 container limit: {len(data)} bytes")
+    fail(f"image exceeds the MX80 container limit: {len(data)} bytes")
 print(f"MX80 image valid: {path} ({len(data)} bytes, sha256={hashlib.sha256(data).hexdigest()})")

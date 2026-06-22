@@ -1,6 +1,8 @@
 # Local binary inputs
 
-This directory is for untracked donor and bootloader inputs used by the MS42P build.
+This directory is for untracked donor firmware used by the VCore-III build.
+The donor is retained only to extract the currently required proprietary
+kernel modules and supporting runtime files.
 
 Accepted donor names include:
 
@@ -8,9 +10,15 @@ Accepted donor names include:
 postmerkOS-20240818.bin   complete 16 MiB donor firmware
 donor-firmware.bin       complete 16 MiB donor firmware
 good-rootfs.squashfs     standalone donor SquashFS
-loader1.bin               standalone 256 KiB RedBoot loader
 ```
 
-The build can download the known PostmerkOS donor and RedBoot loader when the required files are absent, but keeping verified local copies makes repeat builds independent of those download locations.
+The default complete donor remains available from watchmysys when
+`AUTO_DOWNLOAD_DONOR=1` is enabled or the interactive build authorizes the
+download.
 
-Do not commit donor firmware, proprietary modules, bootloader binaries, or generated images to this repository unless redistribution is explicitly permitted.
+Bootloader binaries are not accepted here. The supported VCore-III loader is
+always cloned from `Gadorach/meraki-redboot` and compiled from source, using the
+selected release's own toolchain and payload packer.
+
+Do not commit donor firmware, proprietary modules, or generated images unless
+redistribution is explicitly permitted.

@@ -13,7 +13,7 @@ cmp original-1.bin original-2.bin
 
 If the files differ, stop and correct the connection. A single successful read is not a trustworthy backup.
 
-The host `tools/Flasher/firmware-flasher.sh` utility automates repeated reads, comparisons, serial/SSH handoff, firmware selection, and monitoring.
+The host `tools/backup-and-flash/backup-and-flash.sh` automates repeated reads, byte-for-byte comparison, full-image writing, and explicit readback verification. The separate `tools/firmware-flasher/firmware-flasher.sh` handles manifest-aware in-system updates and pre-kernel UART recovery.
 
 ## Write a complete image
 
@@ -43,3 +43,16 @@ Many SOIC16 clips ship with straight-through ribbon cables that do not match an 
 Connect adapter TX to switch RX, adapter RX to switch TX, and GND to GND. Never connect VCC. UART inputs are not tolerant of voltages above 3.3 V.
 
 See [Vitesse switch hardware](../hardware/vitesse-switches.md) for model-specific access points and [Recovery](recovery.md) for restoring a complete backup.
+
+
+## In-system complete-image replacement
+
+The manifest-aware updater accepts `--full-flash` only for an exact 16 MiB image
+with the declared VCore-III region layout. It backs up each MTD region, writes
+the loader last, and verifies programmed data. This path still depends on a
+working Linux system and cannot replace an external programmer.
+
+The pre-kernel UART recovery path provides host-only `verify`, target `dry-run`,
+and nonce-authorized `flash` operations. See
+[Pre-kernel UART recovery](../architecture/pre-kernel-uart-recovery.md). The checksum-only
+compatibility mode supports system-region updates only.

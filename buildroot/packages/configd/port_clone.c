@@ -54,7 +54,7 @@ int port_clone_apply(struct json_object *request,struct json_object **result,
   }
   char validation_error[256]={0};
   if(validate_configuration(config,validation_error,sizeof(validation_error))!=0){json_object_put(config);json_object_put(warnings);json_object_put(applied);set_error(error,error_size,validation_error);return -EINVAL;}
-  struct apply_result apply;apply_result_init(&apply);int rc=save_config_file(config,error,error_size);if(rc==0)rc=config_apply_full(config,&apply);
+  struct apply_result apply;apply_result_init(&apply);int rc=config_replace_validate_save_apply(config,&apply,error,error_size);
   if(rc==0){struct json_object *reply=json_object_new_object();json_object_object_add(reply,"source",json_object_new_int((int)source_port));json_object_object_add(reply,"targets",applied);json_object_object_add(reply,"warnings",warnings);json_object_object_add(reply,"apply_warnings",json_object_get(apply.warnings));if(result)*result=reply;else json_object_put(reply);}else{json_object_put(applied);json_object_put(warnings);}
   apply_result_cleanup(&apply);json_object_put(config);return rc;
 }

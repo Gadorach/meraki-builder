@@ -7,7 +7,7 @@ Read-only status requests use `network_manager_observe()`, which parses desired 
 ## DHCP configuration
 
 ```json
-{"network":{"ipv4":{"mode":"dhcp","fallback_address":"169.254.0.10/16","mtu":1500}}}
+{"network":{"ipv4":{"mode":"dhcp","fallback_address":"169.254.0.10/16","gateway":"0.0.0.0","mtu":1500}}}
 ```
 
 The manager prefers `/click/uplinkstate/dhcp_state`, confirms details with
@@ -31,7 +31,7 @@ An active DHCP address is retained during a transient renewal miss until expiry.
 {"network":{"ipv4":{"mode":"static","address":"192.168.1.20/24","gateway":"192.168.1.1","mtu":1500}}}
 ```
 
-The gateway must be in the configured subnet. A WebSocket-triggered address change is deferred briefly so the acknowledgement can be transmitted before the connection is disrupted.
+The gateway is optional. When supplied and nonzero, it must be in the configured subnet. Network and broadcast host addresses are rejected for prefixes through /30. A WebSocket-triggered address change is deferred briefly so the acknowledgement can be transmitted before the connection is disrupted.
 
 ## Click command
 

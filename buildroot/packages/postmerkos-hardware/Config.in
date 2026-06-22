@@ -4,5 +4,6 @@ config BR2_PACKAGE_POSTMERKOS_HARDWARE
 	select BR2_PACKAGE_CONFIGD
 	select BR2_PACKAGE_FWUPDATE
 	help
-	  Lightweight LED ownership, reset-button hold handling and one-shot
-	  PoE boot-prune policy for supported postmerkOS switches.
+	  Capability-v2 hardware discovery, LED ownership and one-shot PoE
+	  boot-prune policy. Reset discovery is read-only until a model-specific
+	  input is hardware verified; destructive reset remains disabled.

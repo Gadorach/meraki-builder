@@ -1,0 +1,6 @@
+#!/bin/sh
+case "$1" in
+  start|restart|reload) /usr/sbin/postmerkos-board-identity || true ;;
+  stop) : ;;
+  *) echo "Usage: $0 {start|stop|restart|reload}" >&2; exit 2 ;;
+esac

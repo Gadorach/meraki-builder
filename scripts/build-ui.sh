@@ -34,22 +34,54 @@ select_node() {
   need npm
 }
 
-clone_or_update_ref "$UI_REPO_URL" "$UI_DIR" "$UI_REF" "postmerkos-ui"
+clone_or_update_git_ref "$UI_REPO_URL" "$UI_DIR" "$UI_REF" "postmerkos-ui"
+ui_revision_before="$(git -C "$UI_DIR" rev-parse HEAD)"
+[[ -z "$(git -C "$UI_DIR" status --porcelain)" ]] ||   die "postmerkos-ui checkout is not clean before build"
 select_node
 
-log "Building postmerkos-ui from $UI_REF"
+log "Building postmerkos-ui from authoritative origin/$RESOLVED_GIT_SYMBOLIC_REF"
+# Production firmware owns its WebSocket endpoint. Host shell VITE_* values
+# must never leak into the compiled appliance UI.
+while IFS='=' read -r name _; do
+  [[ "$name" == VITE_* ]] && unset "$name"
+done < <(env)
 (
   cd "$UI_DIR"
   npm_config_cache="$DOWNLOAD_DIR/npm-cache" npm ci --no-audit --no-fund
-  npm run build
+  VITE_CONFIGD_WS_PORT=4001 npm run build
 )
 
 [[ -f "$UI_DIR/build/index.html" ]] || die "UI build did not produce build/index.html"
+[[ "$(git -C "$UI_DIR" rev-parse HEAD)" == "$ui_revision_before" ]] ||   die "postmerkos-ui revision changed during build"
+if ! git -C "$UI_DIR" diff --quiet || ! git -C "$UI_DIR" diff --cached --quiet; then
+  die "postmerkos-ui tracked source changed during build; commit changes upstream instead of modifying them in meraki-builder"
+fi
 rm -rf "$BUILD_DIR/postmerkos-ui"
 mkdir -p "$BUILD_DIR/postmerkos-ui"
 rsync -a --delete "$UI_DIR/build/" "$BUILD_DIR/postmerkos-ui/"
 
 git -C "$UI_DIR" rev-parse HEAD > "$ARTIFACTS_DIR/ui-source-revision.txt"
+python3 - "$ARTIFACTS_DIR/ui-source.json" "$UI_REPO_URL" "$UI_REF" \
+  "$RESOLVED_GIT_SYMBOLIC_REF" "$ui_revision_before" "$RESOLVED_GIT_DESCRIBE" <<'PY_UI'
+import json, sys
+from pathlib import Path
+out, repository, requested, resolved, revision, describe = sys.argv[1:]
+Path(out).write_text(json.dumps({
+    "project": "Gadorach/postmerkos-ui",
+    "repository": repository,
+    "requested_ref": requested,
+    "resolved_ref": resolved,
+    "revision": revision,
+    "describe": describe,
+    "resolution": "authoritative-git",
+}, indent=2, sort_keys=True) + "\n")
+PY_UI
+if grep -R -a -q '14001' "$BUILD_DIR/postmerkos-ui"; then
+  die "production UI contains an unexpected development WebSocket port"
+fi
+if ! grep -R -a -q '4001' "$BUILD_DIR/postmerkos-ui"; then
+  die "production UI does not contain the required configd WebSocket port 4001"
+fi
 find "$BUILD_DIR/postmerkos-ui" -type f -print0 | sort -z | xargs -0 sha256sum \
   > "$ARTIFACTS_DIR/ui-files.sha256"
 touch "$STAMP_DIR/ui-built"

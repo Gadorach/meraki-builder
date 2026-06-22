@@ -4,7 +4,7 @@
 #
 ################################################################################
 
-CONFIGD_VERSION = 0.1
+CONFIGD_VERSION = 0.2
 CONFIGD_SITE = package/configd
 CONFIGD_SITE_METHOD = local
 CONFIGD_INSTALL_TARGET = YES

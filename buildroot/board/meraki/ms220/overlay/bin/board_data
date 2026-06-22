@@ -95,8 +95,7 @@ product_number_to_model() {
             echo MS42P
         ;;
         *)
-            # MS220-48/MS320-48 Y U no product number?!
-            echo $(get_board_cpu)
+            return 1
         ;;
     esac
 }
@@ -128,12 +127,11 @@ get_board_cpu() {
 get_product_number() {
     MTD_PART=$(get_board_config_mtd)
     PRODUCT_NUMBER=$(dd if=${MTD_PART} bs=8 skip=1 count=8 2>/dev/null | grep -Eo "(600-2[018]0[1-9]0)|(0[9])")
-    # this shouldn't happen!
-    if [ -z ${PRODUCT_NUMBER} ]; then
-        PRODUCT_NUMBER=600-21050
-        >&2 echo "Could not get product number, using: ${PRODUCT_NUMBER}"
+    if [ -z "${PRODUCT_NUMBER}" ]; then
+        >&2 echo "Could not get product number"
+        return 1
     fi
-    echo $PRODUCT_NUMBER
+    echo "$PRODUCT_NUMBER"
 }
 
 get_serial_number() {
@@ -161,7 +159,7 @@ get_mac_addr() {
 }
 
 set_mac_addr() {
-    [[ -z "$DANGERZONE" ]] && return 1
+    [ -z "${DANGERZONE:-}" ] && return 1
     if [ $(echo "$1" | grep -Ec '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$') -ne 1 ]; then
         echo "Invalid MAC address: $1"
         return 1
@@ -174,7 +172,7 @@ set_mac_addr() {
 }
 
 set_product_number() {
-    [[ -z "$DANGERZONE" ]] && return 1
+    [ -z "${DANGERZONE:-}" ] && return 1
     if [ $(echo "$1" | grep -Ec '^600-2[018]0[0-9]0$') -ne 1 ]; then
         echo "Invalid product number: $1"
         return 1
@@ -186,7 +184,7 @@ set_product_number() {
 }
 
 set_serial_number() {
-    [[ -z "$DANGERZONE" ]] && return 1
+    [ -z "${DANGERZONE:-}" ] && return 1
     serial=$(echo "$1" | tr -d '-')
     if [ $(echo "$serial" | grep -Ec '^Q2[A-Z0-9]{10}$') -ne 1 ]; then
         echo "Invalid serial number: $1"
@@ -209,7 +207,17 @@ if [ $# -ge 1 ]; then
       get_mac_addr
     ;;
     model)
-      product_number_to_model $(get_product_number)
+      product=$(get_product_number 2>/dev/null || true)
+      if [ -n "$product" ]; then
+        product_number_to_model "$product"
+      else
+        get_board_cpu
+      fi
+    ;;
+    model_exact)
+      product=$(get_product_number 2>/dev/null || true)
+      [ -n "$product" ] || exit 1
+      product_number_to_model "$product"
     ;;
     product_number)
       get_product_number
@@ -218,13 +226,13 @@ if [ $# -ge 1 ]; then
       get_serial_number
     ;;
     set_mac)
-      return $(set_mac_addr $2)
+      set_mac_addr "$2"
     ;;
     set_serial)
-      return $(set_serial $2)
+      set_serial_number "$2"
     ;;
     set_product_number)
-      return $(set_product_number $2)
+      set_product_number "$2"
     ;;
     *)
       usage

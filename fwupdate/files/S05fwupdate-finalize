@@ -1,0 +1,4 @@
+#!/bin/sh
+case "${1:-start}" in
+  start) /usr/sbin/fwupdate-finalize >/dev/null 2>&1 || true ;;
+esac

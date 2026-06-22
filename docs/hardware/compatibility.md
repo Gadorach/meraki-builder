@@ -1,27 +1,29 @@
 # Hardware compatibility
 
-Compatibility is recorded by model and capability rather than by a single global supported flag.
+Compatibility is release-specific and exact-model based. The release manifest records each recognized model as `validated`, `confirmed`, `untested`, or `known-incompatible`. The running management API reads that manifest rather than claiming support from a hard-coded table.
 
-- **Confirmed:** a successful runtime report exists.
-- **Untested:** the platform appears compatible but requires an explicit warning acknowledgement.
-- **Known-incompatible:** architecture or flash geometry is known not to match; normal updater validation blocks it.
+| Exact model group | Driver family | Logical ports | Copper + uplink | PoE |
+|---|---|---:|---:|---:|
+| MS220-8 / MS220-8P | Luton26 | 10 | 8 + 2 | 0 / 8 |
+| MS22 / MS22P | Luton26 | 26 | 24 + 2 | 0 / 24 |
+| MS220-24 / MS220-24P | Luton26 | 26 | 24 + 2 | 0 / 24 |
+| MS320-24 / MS320-24P | Jaguar1 | 28 | 24 + 4 | 0 / 24 |
+| MS220-48, 48P, 48LP, 48FP | Jaguar Dual | 52 | 48 + 4 | model dependent |
+| MS320-48, 48P, 48LP, 48FP | Jaguar Dual | 52 | 48 + 4 | model dependent |
+| MS42 / MS42P | Jaguar Dual | 52 | 48 + 4 | 0 / 48 |
 
-| Model | Family | Ports | Copper + uplink | PoE ports | Status |
-|---|---|---:|---:|---:|---|
-| MS220-8 | VCore-III Luton | 10 | 8 + 2 | 0 | Untested |
-| MS220-8P | VCore-III Luton | 10 | 8 + 2 | 8 | Untested |
-| MS220-24 | VCore-III Luton | 24 | 24 + 0 | 0 | Untested |
-| MS220-24P | VCore-III Luton | 24 | 24 + 0 | 24 | Untested |
-| MS22 / MS22P | VCore-III Luton | 24 | 24 + 0 | 0 / 24 | Untested |
-| MS220-48 variants | VCore-III Jaguar | 52 | 48 + 4 | model dependent | Untested |
-| MS42 | VCore-III dual Jaguar | 52 | 48 + 4 | 0 | Untested |
-| MS42P | VCore-III dual Jaguar | 52 | 48 + 4 | 48 | **Confirmed** |
-| MS320-24 | VCore-III Jaguar | 28 | 24 + 4 | 0 | Untested |
-| MS320-24P | VCore-III Jaguar | 28 | 24 + 4 | 24 | **Confirmed** |
-| MS320-48 variants | VCore-III Jaguar | 52 | 48 + 4 | model dependent | Untested |
-| MX80 | PowerPC | appliance | — | — | Untested build target |
-| MX84 | Cavium/Vitesse | appliance | — | — | Untested, incomplete build inputs |
+One platform-agnostic image carries the complete common, Luton26, Jaguar1, and Jaguar Dual kernel-object matrix plus every additional donor `.ko`. Early boot derives `/run/postmerkos/boardinfo` from the board EEPROM and loads only the matching family. Unknown identity or an unsupported exact model fails closed for model-specific hardware actions.
 
-Confirmation can be granular. A model may be confirmed for boot, management, port mapping, and PoE while destructive firmware-update behavior remains untested.
+Untested artifacts require explicit acknowledgement. Known-incompatible artifacts are rejected. Keep direct SPI recovery available while validating a new exact model, and report boot, management, forwarding, PoE, LED, and update results separately.
 
-Untested devices are allowed to proceed after a warning. Users should keep a direct SPI recovery method and submit the generated compatibility report after testing.
+MX80 remains a separate PowerPC build target. MX84 assets remain incomplete and are not part of the VCore-III image.
+
+
+## Pre-kernel recovery payloads
+
+Release artifacts include separate Luton26 and Jaguar-class recovery payloads.
+The host and target both require the exact model to appear in the selected
+payload descriptor and release manifest. Jaguar Dual models use the
+Jaguar-class SPI software-mode implementation but remain subject to exact-model
+manifest status. `verify` is local-only, `dry-run` performs target preflight
+without erase/program commands, and `flash` requires the target nonce challenge.

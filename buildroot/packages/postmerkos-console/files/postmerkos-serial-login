@@ -2,24 +2,101 @@
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 SECURITY=/config/postmerkos/security.json
-mode=disabled
-if [ -r "$SECURITY" ]; then
-    detected=$(sed -n 's/.*"serial_authentication"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SECURITY" | head -n 1)
-    [ -n "$detected" ] && mode=$detected
-fi
+LOG=/run/postmerkos/serial-session.log
+mkdir -p /run/postmerkos
+read_mode() {
+    mode=disabled
+    if [ -r "$SECURITY" ]; then
+        detected=$(sed -n 's/.*"serial_authentication"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SECURITY" | sed -n '1p')
+        [ -n "$detected" ] && mode=$detected
+    fi
+}
+log_action() {
+    command=$1 result=${2:-requested}
+    uid=$(id -u 2>/dev/null || echo unknown)
+    gid=$(id -g 2>/dev/null || echo unknown)
+    socket=missing; [ -S /run/postmerkos/configd.sock ] && socket=present
+    printf '%s mode=%s uid=%s gid=%s command=%s configd_socket=%s result=%s\n' \
+      "$(date +%s 2>/dev/null || echo 0)" "${mode:-unknown}" "$uid" "$gid" "$command" "$socket" "$result" >>"$LOG"
+}
+show_help() {
+cat <<'HELP'
+Available serial-console commands:
+  pmc / Enter  Start the management interface
+  login        Authenticate as a local Linux user
+  status       Test configd local and WebSocket management paths
+  logs         Show recent configd and WebSocket diagnostics
+  retry        Retry the management interface
+  shell        Enter the root recovery shell
+  reboot       Reboot after explicit confirmation
+  help         Show this command list
+HELP
+}
+show_logs() {
+    for file in /run/postmerkos/configd.exit /run/postmerkos/configd.log /run/postmerkos/websocket.log /run/postmerkos/serial-session.log; do
+        [ -r "$file" ] || continue
+        echo "--- $file ---"
+        tail -n 60 "$file"
+    done
+}
+confirm_reboot() {
+    printf 'Type REBOOT to restart the switch: '
+    IFS= read -r answer || return 1
+    [ "$answer" = REBOOT ] || { echo 'Reboot cancelled.'; return 1; }
+    sync
+    reboot
+}
 printf '\npostmerkOS serial console\n'
-case "$mode" in
-    root)
-        echo 'Root authentication is required.'
-        exec /bin/login root
-        ;;
-    users)
-        echo 'Login with a postmerkOS administrator, operator, or viewer account.'
-        exec /bin/login
-        ;;
-    *)
-        printf 'Press Enter or type "pmc" to start the management interface.\npmc: '
-        IFS= read -r _trigger || exit 0
-        exec /usr/bin/postmerkos-console menu
-        ;;
-esac
+while :; do
+    read_mode
+    case "$mode" in
+        root)
+            echo 'Root authentication is required.'
+            log_action login-root
+            /bin/login root
+            rc=$?
+            log_action login-root "exit-$rc"
+            ;;
+        users)
+            echo 'Login with a postmerkOS administrator, operator, or viewer account.'
+            log_action login-users
+            /bin/login
+            rc=$?
+            log_action login-users "exit-$rc"
+            ;;
+        *)
+            printf 'Press Enter or type "pmc" to start management.\nType "help" for login and recovery commands.\npmc: '
+            IFS= read -r trigger || exit 0
+            case "$trigger" in
+                ''|pmc|PMC|retry)
+                    log_action pmc
+                    /usr/bin/postmerkos-console menu
+                    rc=$?
+                    log_action pmc "exit-$rc"
+                    ;;
+                login)
+                    log_action login
+                    /bin/login
+                    rc=$?
+                    log_action login "exit-$rc"
+                    ;;
+                status)
+                    log_action status
+                    /usr/bin/postmerkosctl management-health
+                    rc=$?
+                    log_action status "exit-$rc"
+                    ;;
+                logs) log_action logs; show_logs ;;
+                shell)
+                    log_action shell
+                    echo 'Entering the raw Linux shell. Run "pmc" to return to the console.'
+                    POSTMERKOS_RAW_SHELL=1 /bin/sh -l
+                    ;;
+                reboot) log_action reboot; confirm_reboot ;;
+                help|'?') show_help ;;
+                *) echo 'Unknown command. Type "help" for available commands.' ;;
+            esac
+            ;;
+    esac
+    printf '\nReturned to the postmerkOS serial console.\n'
+done

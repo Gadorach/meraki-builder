@@ -1,14 +1,22 @@
+#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <json-c/json.h>
+#include <signal.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <netinet/in.h>
+#include <strings.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
+
+#include "socket_io.h"
 
 #define RESPONSE_MAX 262144
 
@@ -16,6 +24,22 @@ static const char *socket_path(void) {
   const char *path = getenv("POSTMERKOS_CONFIGD_SOCKET");
   return path && *path ? path : "/run/postmerkos/configd.sock";
 }
+
+static const char *pid_path(void) {
+  const char *path = getenv("POSTMERKOS_CONFIGD_PID");
+  return path && *path ? path : "/run/configd.pid";
+}
+
+static int websocket_port(void) {
+  const char *text = getenv("POSTMERKOS_WEBSOCKET_PORT");
+  if (!text || !*text) return 4001;
+  char *end = NULL;
+  long value = strtol(text, &end, 10);
+  return end && !*end && value > 0 && value <= 65535 ? (int)value : 4001;
+}
+
+static struct json_object *session_data(void);
+static const char *string_member(struct json_object *object, const char *key, const char *fallback);
 
 static int connect_socket(void) {
   int fd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -31,6 +55,151 @@ static int connect_socket(void) {
   return fd;
 }
 
+
+static int read_exact(int fd, void *data, size_t length) {
+  unsigned char *cursor = data;
+  while (length) {
+    ssize_t got = read(fd, cursor, length);
+    if (got < 0) { if (errno == EINTR) continue; return -errno; }
+    if (!got) return -ECONNRESET;
+    cursor += (size_t)got; length -= (size_t)got;
+  }
+  return 0;
+}
+
+static bool contains_case_insensitive(const char *text, const char *needle) {
+  if (!text || !needle || !*needle) return false;
+  size_t length = strlen(needle);
+  for (const char *cursor = text; *cursor; cursor++)
+    if (!strncasecmp(cursor, needle, length)) return true;
+  return false;
+}
+
+static int websocket_read_text(int fd, char *output, size_t output_size) {
+  unsigned char header[2];
+  int rc = read_exact(fd, header, sizeof(header));
+  if (rc != 0) return rc;
+  unsigned int opcode = header[0] & 0x0fU;
+  unsigned long long length = header[1] & 0x7fU;
+  bool masked = (header[1] & 0x80U) != 0;
+  if (length == 126U) {
+    unsigned char ext[2]; if ((rc = read_exact(fd, ext, 2)) != 0) return rc;
+    length = ((unsigned long long)ext[0] << 8) | ext[1];
+  } else if (length == 127U) {
+    unsigned char ext[8]; if ((rc = read_exact(fd, ext, 8)) != 0) return rc;
+    length = 0; for (size_t i = 0; i < 8; i++) length = (length << 8) | ext[i];
+  }
+  unsigned char mask[4] = {0};
+  if (masked && (rc = read_exact(fd, mask, 4)) != 0) return rc;
+  if (length + 1 > output_size) return -EMSGSIZE;
+  if ((rc = read_exact(fd, output, (size_t)length)) != 0) return rc;
+  for (size_t i = 0; masked && i < (size_t)length; i++)
+    output[i] = (char)((unsigned char)output[i] ^ mask[i & 3U]);
+  output[length] = '\0';
+  if (opcode == 0x8U) return -ECONNRESET;
+  return opcode == 0x1U ? 0 : -EPROTO;
+}
+
+static int websocket_hello_probe(int port, char *error, size_t error_size) {
+  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) { snprintf(error, error_size, "socket: %s", strerror(errno)); return -errno; }
+  struct timeval timeout = { .tv_sec = 3, .tv_usec = 0 };
+  setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+  setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+  struct sockaddr_in address;
+  memset(&address, 0, sizeof(address)); address.sin_family = AF_INET;
+  address.sin_port = htons((uint16_t)port); inet_pton(AF_INET, "127.0.0.1", &address.sin_addr);
+  if (connect(fd, (struct sockaddr *)&address, sizeof(address)) != 0) {
+    int rc = -errno; snprintf(error, error_size, "TCP connect: %s", strerror(errno)); close(fd); return rc;
+  }
+  char request_text[512];
+  int request_length = snprintf(request_text, sizeof(request_text),
+      "GET / HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nUpgrade: websocket\r\n"
+      "Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+      "Sec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: configd-ws\r\n\r\n",
+      port);
+  if (request_length < 0 || (size_t)request_length >= sizeof(request_text)) {
+    snprintf(error, error_size, "handshake request overflow"); close(fd); return -EOVERFLOW;
+  }
+  int rc = socket_write_all(fd, request_text, (size_t)request_length);
+  if (rc != 0) { snprintf(error, error_size, "handshake write failed"); close(fd); return rc; }
+  char headers[4096]; size_t used = 0;
+  while (used + 1 < sizeof(headers)) {
+    ssize_t got = read(fd, headers + used, 1);
+    if (got <= 0) { rc = got < 0 ? -errno : -ECONNRESET; break; }
+    used += 1; headers[used] = '\0';
+    if (used >= 4 && !memcmp(headers + used - 4, "\r\n\r\n", 4)) { rc = 0; break; }
+  }
+  if (rc != 0 || !strstr(headers, " 101 ")) {
+    snprintf(error, error_size, "WebSocket upgrade was not accepted"); close(fd); return -EPROTO;
+  }
+  if (!contains_case_insensitive(headers, "Sec-WebSocket-Protocol: configd-ws")) {
+    snprintf(error, error_size, "configd-ws subprotocol was not selected"); close(fd); return -EPROTO;
+  }
+  const char *payload = "{\"id\":\"health\",\"type\":\"hello\"}";
+  size_t length = strlen(payload); unsigned char frame[256];
+  const unsigned char mask[4] = {0x50, 0x4d, 0x4f, 0x53};
+  frame[0] = 0x81; frame[1] = (unsigned char)(0x80U | length);
+  memcpy(frame + 2, mask, 4);
+  for (size_t i = 0; i < length; i++) frame[6 + i] = (unsigned char)payload[i] ^ mask[i & 3U];
+  if ((rc = socket_write_all(fd, frame, 6 + length)) != 0) {
+    snprintf(error, error_size, "hello write failed"); close(fd); return rc;
+  }
+  char text[4096]; bool hello = false;
+  for (int attempt = 0; attempt < 4; attempt++) {
+    rc = websocket_read_text(fd, text, sizeof(text));
+    if (rc != 0) break;
+    struct json_object *message = json_tokener_parse(text);
+    struct json_object *type = NULL, *data = NULL, *service = NULL, *protocol = NULL;
+    if (message && json_object_object_get_ex(message, "type", &type) &&
+        !strcmp(json_object_get_string(type), "hello") &&
+        json_object_object_get_ex(message, "data", &data) &&
+        json_object_object_get_ex(data, "service", &service) &&
+        !strcmp(json_object_get_string(service), "configd") &&
+        json_object_object_get_ex(data, "protocol", &protocol) &&
+        json_object_get_int(protocol) == 2) hello = true;
+    if (message) json_object_put(message);
+    if (hello) break;
+  }
+  close(fd);
+  if (!hello) { snprintf(error, error_size, "configd hello response failed"); return rc ? rc : -EPROTO; }
+  return 0;
+}
+
+static int management_health(bool quiet) {
+  int failures = 0;
+  FILE *pid_file = fopen(pid_path(), "r");
+  long pid = 0;
+  bool process_ok = pid_file && fscanf(pid_file, "%ld", &pid) == 1 && pid > 0 &&
+                    kill((pid_t)pid, 0) == 0;
+  if (pid_file) fclose(pid_file);
+  if (!quiet) printf("configd process:            %s%s\n", process_ok ? "PASS" : "FAIL",
+                     process_ok ? "" : " (not running)");
+  if (!process_ok) failures++;
+  struct stat socket_status;
+  bool socket_ok = stat(socket_path(), &socket_status) == 0 && S_ISSOCK(socket_status.st_mode);
+  if (!quiet) printf("local management socket:   %s%s\n", socket_ok ? "PASS" : "FAIL",
+                     socket_ok ? "" : " (missing)");
+  if (!socket_ok) failures++;
+  struct json_object *identity = session_data();
+  if (!identity) {
+    if (!quiet) puts("local session request:       FAIL");
+    failures++;
+  } else {
+    if (!quiet) printf("local session request:       PASS (%s / %s)\n",
+                       string_member(identity, "username", "unknown"),
+                       string_member(identity, "role", "none"));
+    json_object_put(identity);
+  }
+  char error[256] = {0};
+  int rc = websocket_hello_probe(websocket_port(), error, sizeof(error));
+  if (rc != 0) {
+    if (!quiet) printf("WebSocket configd-ws hello:  FAIL (%s)\n", error);
+    failures++;
+  } else if (!quiet) puts("WebSocket configd-ws hello:  PASS (protocol 2)");
+  return failures ? 1 : 0;
+}
+
 static struct json_object *request(const char *type, struct json_object *data) {
   int fd = connect_socket();
   if (fd < 0) {
@@ -41,27 +210,25 @@ static struct json_object *request(const char *type, struct json_object *data) {
   json_object_object_add(message, "type", json_object_new_string(type));
   if (data) json_object_object_add(message, "data", json_object_get(data));
   const char *text = json_object_to_json_string_ext(message, JSON_C_TO_STRING_PLAIN);
-  size_t left = strlen(text);
-  const char *cursor = text;
-  while (left) {
-    ssize_t wrote = write(fd, cursor, left);
-    if (wrote < 0) { if (errno == EINTR) continue; break; }
-    cursor += wrote; left -= (size_t)wrote;
+  int write_rc = socket_write_line(fd, text, strlen(text));
+  if (write_rc != 0) {
+    fprintf(stderr, "postmerkosctl: request write failed: %s\n", strerror(-write_rc));
+    close(fd);
+    json_object_put(message);
+    return NULL;
   }
-  write(fd, "\n", 1);
   shutdown(fd, SHUT_WR);
-  char *buffer = malloc(RESPONSE_MAX + 1);
+  char *buffer = malloc(RESPONSE_MAX + 2);
   if (!buffer) { close(fd); json_object_put(message); return NULL; }
-  size_t used = 0;
-  while (used < RESPONSE_MAX) {
-    ssize_t got = read(fd, buffer + used, RESPONSE_MAX - used);
-    if (got == 0) break;
-    if (got < 0) { if (errno == EINTR) continue; break; }
-    used += (size_t)got;
-  }
-  buffer[used] = '\0';
+  ssize_t got = socket_read_line(fd, buffer, RESPONSE_MAX + 2, 5000);
   close(fd);
   json_object_put(message);
+  if (got <= 0) {
+    if (got < 0) fprintf(stderr, "postmerkosctl: response read failed: %s\n", strerror((int)-got));
+    else fprintf(stderr, "postmerkosctl: configd closed without a response\n");
+    free(buffer);
+    return NULL;
+  }
   struct json_object *reply = json_tokener_parse(buffer);
   free(buffer);
   if (!reply) fprintf(stderr, "postmerkosctl: invalid response from configd\n");
@@ -115,6 +282,36 @@ static bool capability_present(struct json_object *identity, const char *name) {
     if (cap && !strcmp(json_object_get_string(cap), name)) return true;
   }
   return false;
+}
+
+static void print_session_shell(struct json_object *identity) {
+  const char *username = string_member(identity, "username", "");
+  const char *role = string_member(identity, "role", "none");
+  struct json_object *caps = member(identity, "capabilities");
+  printf("POSTMERKOS_USERNAME='%s'\n", username);
+  printf("POSTMERKOS_ROLE='%s'\n", role);
+  fputs("POSTMERKOS_CAPABILITIES='", stdout);
+  for (size_t i = 0; caps && json_object_is_type(caps, json_type_array) &&
+       i < json_object_array_length(caps); i++) {
+    struct json_object *cap = json_object_array_get_idx(caps, i);
+    if (cap && json_object_is_type(cap, json_type_string))
+      printf("%s%s", i ? " " : "", json_object_get_string(cap));
+  }
+  puts("'");
+}
+
+static void print_service_summary(struct json_object *data) {
+  puts("SERVICE       STATE       ENABLED     AUTOSTART");
+  puts("------------- ----------- ----------- -----------");
+  const char *names[] = {"ssh", "web", "chrony"};
+  const char *labels[] = {"SSH", "Web UI", "Chrony"};
+  for (size_t i = 0; i < 3; i++) {
+    struct json_object *service = member(data, names[i]);
+    printf("%-13s %-11s %-11s %-11s\n", labels[i],
+           bool_member(service, "running", false) ? "running" : "stopped",
+           bool_member(service, "enabled", false) ? "yes" : "no",
+           bool_member(service, "autostart", false) ? "yes" : "no");
+  }
 }
 
 static struct json_object *session_data(void) {
@@ -204,13 +401,14 @@ static void print_port(struct json_object *snapshot, unsigned int port) {
 
 static void usage(FILE *stream) {
   fputs("usage: postmerkosctl COMMAND [arguments]\n"
-        "  session [--json] | role | has CAPABILITY\n"
+        "  session [--json|--shell] | role | has CAPABILITY\n"
+        "  management-health [--quiet]\n"
         "  status | summary | ports FIRST-LAST | port PORT\n"
         "  get PATH | set PATH VALUE | set-string PATH TEXT | apply-json JSON\n"
         "  config | backup FILE | validate FILE | restore FILE | reboot\n"
         "  compatibility-needed | compatibility-report | compatibility-ack\n"
         "  users | user-create USER PASSWORD ROLE | user-role USER ROLE | user-delete USER\n"
-        "  services | services-set JSON | services-apply | service NAME ACTION\n"
+        "  services | services-summary | services-set JSON | services-apply | service NAME ACTION\n"
         "  service-get PATH | service-set PATH VALUE\n"
         "  time | time-set JSON | time-get PATH | time-set-field PATH VALUE\n"
         "  time-sync | time-set-clock EPOCH\n", stream);
@@ -225,8 +423,11 @@ static int write_config_file(const char *path, struct json_object *config) {
 }
 
 int main(int argc, char **argv) {
+  signal(SIGPIPE, SIG_IGN);
   if (argc < 2) { usage(stderr); return 2; }
   const char *command = argv[1];
+  if (!strcmp(command, "management-health"))
+    return management_health(argc > 2 && !strcmp(argv[2], "--quiet"));
   if (!strcmp(command, "session") || !strcmp(command, "role") || !strcmp(command, "has")) {
     struct json_object *identity = session_data();
     if (!identity) return 1;
@@ -237,6 +438,8 @@ int main(int argc, char **argv) {
       else rc = capability_present(identity, argv[2]) ? 0 : 1;
     } else if (argc > 2 && !strcmp(argv[2], "--json"))
       puts(json_object_to_json_string_ext(identity, JSON_C_TO_STRING_PRETTY));
+    else if (argc > 2 && !strcmp(argv[2], "--shell"))
+      print_session_shell(identity);
     else printf("%s (%s)\n", string_member(identity, "username", ""), string_member(identity, "role", "none"));
     json_object_put(identity); return rc;
   }
@@ -387,10 +590,14 @@ int main(int argc, char **argv) {
     puts(json_object_to_json_string_ext(result, JSON_C_TO_STRING_PRETTY));
     json_object_put(reply); return 0;
   }
-  if (!strcmp(command, "services") || !strcmp(command, "time")) {
-    struct json_object *reply=request(!strcmp(command,"services")?"services.get":"time.get",NULL);
+  if (!strcmp(command, "services") || !strcmp(command, "services-summary") ||
+      !strcmp(command, "time")) {
+    bool service_command = strcmp(command, "time") != 0;
+    struct json_object *reply=request(service_command ? "services.get" : "time.get",NULL);
     struct json_object *data=reply_data(reply); if(!data){if(reply)json_object_put(reply);return 1;}
-    puts(json_object_to_json_string_ext(data,JSON_C_TO_STRING_PRETTY));json_object_put(reply);return 0;
+    if (!strcmp(command, "services-summary")) print_service_summary(data);
+    else puts(json_object_to_json_string_ext(data,JSON_C_TO_STRING_PRETTY));
+    json_object_put(reply);return 0;
   }
   if (!strcmp(command, "service-get") || !strcmp(command, "time-get")) {
     if(argc!=3){usage(stderr);return 2;}struct json_object *data=json_object_new_object();json_object_object_add(data,"path",json_object_new_string(argv[2]));

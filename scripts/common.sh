@@ -38,8 +38,29 @@ DONOR_URL="${DONOR_URL:-https://watchmysys.com/files/meraki/ms220/postmerkOS-202
 DONOR_DEFAULT="$INPUTS_DIR/postmerkOS-20240818.bin"
 DONOR_ROOT="$EXTRACTED_DIR/donor-rootfs"
 DONOR_ROOTFS_REGION="$EXTRACTED_DIR/donor-rootfs-region.squashfs"
+LOADER_REPO_URL="${LOADER_REPO_URL:-https://github.com/Gadorach/meraki-redboot.git}"
+LOADER_SOURCE_ARCHIVE="${LOADER_SOURCE_ARCHIVE:-}"
+# Upstream main is authoritative. The builder fetches it and never patches it.
+# An exact commit may be supplied explicitly for reproducible release builds.
+# "latest" remains a compatibility alias for "main".
+LOADER_REF="${LOADER_REF:-main}"
+LOADER_SOURCE_DIR="${LOADER_SOURCE_DIR:-$SOURCES_DIR/meraki-redboot}"
+LOADER_WORK_DIR="${LOADER_WORK_DIR:-$LOADER_SOURCE_DIR/.work}"
+LOADER_VARIANT="${LOADER_VARIANT:-development}"
+LOADER_BUILD_MODE="${LOADER_BUILD_MODE:-auto}"
+LOADER_PAYLOAD_SLOT_END="${LOADER_PAYLOAD_SLOT_END:-0x00300000}"
+LOADER_HARD_PAYLOAD_LIMIT="${LOADER_HARD_PAYLOAD_LIMIT:-0x002bffe0}"
 LOADER_ARTIFACT="$ARTIFACTS_DIR/loader1.bin"
-REDBOOT_URL="${REDBOOT_URL:-https://github.com/halmartin/MS42-GPL-sources-3-18-122/raw/master/redboot/redboot-nocrc-sz.bin}"
+LOADER_MANIFEST="$ARTIFACTS_DIR/loader1.bin.manifest.json"
+LOADER_PAYLOAD_PACKER="$LOADER_SOURCE_DIR/tools/mkvcoreiii_payload.py"
+LOADER_SOURCE_REVISION_FILE="$ARTIFACTS_DIR/meraki-redboot-source-revision.txt"
+LOADER_SOURCE_SELECTION_RECORD="$ARTIFACTS_DIR/meraki-redboot-source.json"
+LOADER_SOURCE_VERSION_FILE="$ARTIFACTS_DIR/meraki-redboot-version.txt"
+LOADER_BUILD_SOURCE_RECORD="$ARTIFACTS_DIR/loader1.bin.source.json"
+RECOVERY_ARTIFACT_DIR="$ARTIFACTS_DIR/recovery"
+
+VENDOR_MODULE_TOOL="$REPO_ROOT/buildroot/board/meraki/ms220/vendor-module-tree.py"
+VENDOR_MODULE_REQUIRED="$REPO_ROOT/buildroot/board/meraki/ms220/vendor-modules.required"
 
 JOBS="${JOBS:-$(nproc 2>/dev/null || printf '1')}"
 DISTROBOX_NAME="${DISTROBOX_NAME:-meraki-build}"
@@ -53,6 +74,12 @@ log() { printf '\n==> %s\n' "$*"; }
 warn() { printf 'WARNING: %s\n' "$*" >&2; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "Required command not found: $1"; }
+
+verify_vendor_module_tree() {
+  local tree="$1"
+  need python3
+  python3 "$VENDOR_MODULE_TOOL" verify "$tree"     --required-file "$VENDOR_MODULE_REQUIRED" --quiet
+}
 
 is_interactive() { [[ -t 0 && -t 1 && "${NONINTERACTIVE:-0}" != 1 ]]; }
 
@@ -129,6 +156,72 @@ clone_or_update_ref() {
   else
     git -C "$dir" fetch origin "+refs/heads/$ref:refs/remotes/origin/$ref" --tags
     git -C "$dir" checkout -B "$ref" "origin/$ref"
+  fi
+}
+
+
+clone_or_update_git_ref() {
+  local url="$1" dir="$2" requested_ref="$3" label="${4:-repository}" ref
+  ref="$requested_ref"
+  need git
+
+  if [[ "$ref" == latest ]]; then
+    warn "$label ref 'latest' is deprecated; tracking origin/main"
+    ref=main
+  fi
+
+  if [[ ! -d "$dir/.git" ]]; then
+    log "Cloning $label"
+    git clone "$url" "$dir"
+  fi
+
+  if [[ -n "$(git -C "$dir" status --porcelain)" ]]; then
+    die "$label has local changes in $dir. Commit them to the upstream repository before building. The builder never patches source checkouts."
+  fi
+
+  if [[ "$ref" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+    log "Refreshing $label and selecting exact commit $ref"
+    git -C "$dir" fetch origin --tags --prune
+    git -C "$dir" cat-file -e "$ref^{commit}" 2>/dev/null || \
+      die "$label commit is unavailable after fetch: $ref"
+    git -C "$dir" checkout --detach "$ref^{commit}"
+  else
+    log "Refreshing authoritative $label branch origin/$ref"
+    git -C "$dir" fetch origin "+refs/heads/$ref:refs/remotes/origin/$ref" --prune
+    git -C "$dir" show-ref --verify --quiet "refs/remotes/origin/$ref" || \
+      die "$label branch is unavailable: origin/$ref"
+    git -C "$dir" checkout -B "$ref" "origin/$ref"
+    git -C "$dir" reset --hard "origin/$ref"
+  fi
+
+  normalize_future_git_timestamps "$dir" "$label"
+  RESOLVED_GIT_SYMBOLIC_REF="$ref"
+  RESOLVED_GIT_REF="$(git -C "$dir" rev-parse HEAD)"
+  RESOLVED_GIT_DESCRIBE="$(git -C "$dir" describe --tags --always --dirty)"
+}
+
+normalize_future_git_timestamps() {
+  local dir="$1" label="${2:-repository}" count
+  count="$(python3 - "$dir" <<'PY_TIMESTAMPS'
+import os, subprocess, sys, time
+from pathlib import Path
+root=Path(sys.argv[1])
+now=time.time()
+raw=subprocess.check_output(["git","-C",str(root),"ls-files","-z"])
+count=0
+for item in raw.split(b"\0"):
+    if not item: continue
+    path=root/os.fsdecode(item)
+    try: st=path.stat()
+    except FileNotFoundError: continue
+    if st.st_mtime > now + 30:
+        os.utime(path, (min(st.st_atime, now), now), follow_symlinks=False)
+        count += 1
+print(count)
+PY_TIMESTAMPS
+)"
+  if [[ "$count" != 0 ]]; then
+    log "Normalized $count future-dated tracked files in $label"
   fi
 }
 

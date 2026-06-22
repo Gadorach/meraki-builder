@@ -29,6 +29,6 @@ printf '\nInputs and build state:\n'
 [[ -f "$KERNEL_HEADERS_TARBALL" ]] && printf '  [ok] kernel headers archive\n' || printf '  [missing] kernel headers archive\n'
 [[ -d "$BUILDROOT_DIR" ]] && printf '  [ok] Buildroot %s\n' "$BUILDROOT_VERSION" || printf '  [missing] Buildroot %s\n' "$BUILDROOT_VERSION"
 [[ -d "$DONOR_ROOT/lib/modules" ]] && printf '  [ok] extracted donor modules\n' || printf '  [missing] extracted donor modules\n'
-[[ -f "$LOADER_ARTIFACT" ]] && printf '  [ok] 256 KiB RedBoot loader\n' || printf '  [missing] RedBoot loader\n'
+[[ -f "$LOADER_ARTIFACT" ]] && printf '  [ok] 256 KiB source-built meraki-redboot\n' || printf '  [missing] meraki-redboot loader\n'
 
 exit "$failed"

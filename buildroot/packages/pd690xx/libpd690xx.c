@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <errno.h>
 #include <string.h>
 #include <fcntl.h>
 #include <sys/ioctl.h> 
@@ -43,7 +44,7 @@ void i2c_init(struct pd690xx_cfg *pd690xx) {
       } else {
         // save the file descriptor in the array of global file descriptors
         pd690xx->i2c_fds[i2c_dev] = i2c_fd;
-        unsigned int res;
+        unsigned int res = 0;
 
         if (i2c_dev == 1) {
             start_idx = 2;
@@ -58,8 +59,9 @@ void i2c_init(struct pd690xx_cfg *pd690xx) {
             if (DEBUG) {
                 fprintf(stderr, "Probing I2C address %02X\n", pd690xx->pd690xx_addrs[i]);
             }
-            i2c_read(i2c_fd, pd690xx->pd690xx_addrs[i], CFGC_ICVER, &res);
-            if ((res >> 10) > 0) {
+            res = 0;
+            if (i2c_read(i2c_fd, pd690xx->pd690xx_addrs[i], CFGC_ICVER, &res) == 0 &&
+                (res >> 10) > 0) {
                 pd690xx->pd690xx_pres[i] = 1;
             }
         }
@@ -222,38 +224,41 @@ unsigned int port_base_addr(int type, int port) {
 }
 
 int port_able(struct pd690xx_cfg *pd690xx, int op, int port) {
-    const char *operation[4] = {"disabl", "enabl", "forc", "reserv"};
-    unsigned int res;
-    unsigned int reg;
+    static const char *const operation[] = {"disabl", "enabl", "forc"};
+    if (!pd690xx || op < PORT_DISABLED || op > PORT_FORCED ||
+        port < 1 || port > 48) {
+        return -EINVAL;
+    }
+
     unsigned char pd_addr = get_pd690xx_addr(pd690xx, port);
-    if (pd_addr == 0) {
-        return -1;
-    }
-    unsigned int port_addr = port_base_addr(PORT_CONFIG, port);
-    if (DEBUG) {
-        fprintf(stderr, "Port addr: %02X\n", port_addr);
-    }
     int i2c_fd = pd690xx_fd(pd690xx, port);
-    i2c_read(i2c_fd, pd_addr, port_addr, &reg);
-    switch(op) {
-        case PORT_DISABLED:
-            res = i2c_write(i2c_fd, pd_addr, port_addr, reg & 0xFC);
-            break;
-        case PORT_ENABLED:
-            res = i2c_write(i2c_fd, pd_addr, port_addr, (reg & 0xFD) | 0x01);
-            break;
-        case PORT_FORCED:
-            res = i2c_write(i2c_fd, pd_addr, port_addr, (reg & 0xFC) | 0x02);
-            break;
+    if (pd_addr == 0 || i2c_fd < 0) return -ENODEV;
+
+    unsigned int port_addr = port_base_addr(PORT_CONFIG, port);
+    unsigned int reg = 0;
+    if (DEBUG) fprintf(stderr, "Port addr: %02X\n", port_addr);
+    if (i2c_read(i2c_fd, pd_addr, port_addr, &reg) != 0) return -EIO;
+
+    unsigned int desired;
+    switch (op) {
+        case PORT_DISABLED: desired = reg & 0xFCU; break;
+        case PORT_ENABLED:  desired = (reg & 0xFCU) | 0x01U; break;
+        case PORT_FORCED:   desired = (reg & 0xFCU) | 0x02U; break;
+        default: return -EINVAL;
     }
-    if (res != 0) {
-        printf("Error %sing port %d\n", operation[op], port);
-        return -1;
+    if (i2c_write(i2c_fd, pd_addr, port_addr, desired) != 0) {
+        fprintf(stderr, "Error %sing port %d\n", operation[op], port);
+        return -EIO;
     }
-    // sleep before we poll the port register
+
     usleep(100000);
-    i2c_read(i2c_fd, pd_addr, port_addr, &reg);
-    printf("Port %d: %sed\n", port, operation[(reg & 0x03)]);
+    unsigned int readback = 0;
+    if (i2c_read(i2c_fd, pd_addr, port_addr, &readback) != 0) return -EIO;
+    if ((readback & 0x03U) != (desired & 0x03U)) {
+        fprintf(stderr, "Port %d state verification failed\n", port);
+        return -EIO;
+    }
+    printf("Port %d: %sed\n", port, operation[readback & 0x03U]);
     return 0;
 }
 

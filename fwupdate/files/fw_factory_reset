@@ -1,0 +1,27 @@
+#!/bin/sh
+set -eu
+. /usr/lib/fwupdate/common.sh
+YES=0
+[ "${1:-}" = --yes ] && YES=1
+[ "$(id -u)" -eq 0 ] || fw_die 'factory reset must run as root'
+check_board
+check_mtd_layout
+if [ "$YES" -ne 1 ]; then
+    printf 'Type FACTORY-RESET to erase persistent settings and reboot: '
+    read -r answer
+    [ "$answer" = FACTORY-RESET ] || exit 1
+fi
+status_write resetting prepare 5 'Factory reset accepted; persistent JFFS2 settings will be erased'
+command -v postmerkos-ledctl >/dev/null 2>&1 && postmerkos-ledctl acquire reset || true
+sync
+for proc in configd uhttpd chronyd dropbear syslogd klogd crond dhcpclient; do killall "$proc" >/dev/null 2>&1 || true; done
+sleep 1
+umount /root >/dev/null 2>&1 || true
+umount /etc >/dev/null 2>&1 || true
+umount /overlay >/dev/null 2>&1 || true
+status_write resetting erase 50 'Erasing persistent JFFS2 configuration partition'
+flash_erase "/dev/$OVERLAY_MTD" 0 0 >/dev/null || fw_die 'JFFS2 erase failed'
+status_write success reboot 100 'Persistent settings erased; rebooting into factory defaults'
+command -v postmerkos-ledctl >/dev/null 2>&1 && postmerkos-ledctl all-off || true
+sync
+reboot -f >/dev/null 2>&1 || echo b > /proc/sysrq-trigger

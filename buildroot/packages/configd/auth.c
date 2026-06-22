@@ -4,9 +4,7 @@
 #include <crypt.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <grp.h>
-#include <pwd.h>
-#include <shadow.h>
+#include <json-c/json.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -15,6 +13,37 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+#define ACCOUNT_LINE_MAX 4096
+
+
+static const char *account_path(const char *environment, const char *fallback) {
+  const char *value = getenv(environment);
+  return value && *value ? value : fallback;
+}
+
+struct account_record {
+  char name[65];
+  char password[512];
+  uid_t uid;
+  gid_t gid;
+  char home[256];
+  char shell[128];
+};
+
+
+static char *next_colon_field(char **cursor) {
+  if (!cursor || !*cursor) return NULL;
+  char *field = *cursor;
+  char *separator = strchr(field, ':');
+  if (separator) {
+    *separator = '\0';
+    *cursor = separator + 1;
+  } else {
+    *cursor = NULL;
+  }
+  return field;
+}
 
 static void set_error(char *error, size_t size, const char *message) {
   if (error && size) snprintf(error, size, "%s", message ? message : "error");
@@ -30,8 +59,79 @@ static bool safe_username(const char *username) {
   return true;
 }
 
-static bool user_is_authorized(const struct passwd *entry) {
-  return entry && role_for_username(entry->pw_name) != POSTMERKOS_ROLE_NONE;
+static void trim_newline(char *text) {
+  if (text) text[strcspn(text, "\r\n")] = '\0';
+}
+
+static bool parse_account_line(char *line, struct account_record *record) {
+  char *cursor = line;
+  char *name = next_colon_field(&cursor);
+  char *password = next_colon_field(&cursor);
+  char *uid_text = next_colon_field(&cursor);
+  char *gid_text = next_colon_field(&cursor);
+  (void)next_colon_field(&cursor); /* gecos */
+  char *home = next_colon_field(&cursor);
+  char *shell = next_colon_field(&cursor);
+  if (!name || !password || !uid_text || !gid_text || !home || !shell)
+    return false;
+  char *end_uid = NULL, *end_gid = NULL;
+  unsigned long uid = strtoul(uid_text, &end_uid, 10);
+  unsigned long gid = strtoul(gid_text, &end_gid, 10);
+  if (!end_uid || *end_uid || !end_gid || *end_gid) return false;
+  memset(record, 0, sizeof(*record));
+  snprintf(record->name, sizeof(record->name), "%s", name);
+  snprintf(record->password, sizeof(record->password), "%s", password);
+  record->uid = (uid_t)uid;
+  record->gid = (gid_t)gid;
+  snprintf(record->home, sizeof(record->home), "%s", home);
+  snprintf(record->shell, sizeof(record->shell), "%s", shell);
+  return true;
+}
+
+static int account_by_name(const char *username, struct account_record *record) {
+  if (!safe_username(username) || !record) return -EINVAL;
+  FILE *file = fopen(account_path("POSTMERKOS_PASSWD_FILE", "/etc/passwd"), "r");
+  if (!file) return -errno;
+  char line[ACCOUNT_LINE_MAX];
+  int rc = -ENOENT;
+  while (fgets(line, sizeof(line), file)) {
+    trim_newline(line);
+    struct account_record candidate;
+    if (!parse_account_line(line, &candidate)) continue;
+    if (!strcmp(candidate.name, username)) {
+      *record = candidate;
+      rc = 0;
+      break;
+    }
+  }
+  fclose(file);
+  return rc;
+}
+
+static bool account_exists(const char *username) {
+  struct account_record record;
+  return account_by_name(username, &record) == 0;
+}
+
+static int shadow_hash(const char *username, char *hash, size_t hash_size) {
+  FILE *file = fopen(account_path("POSTMERKOS_SHADOW_FILE", "/etc/shadow"), "r");
+  if (!file) return -errno;
+  char line[ACCOUNT_LINE_MAX];
+  int rc = -ENOENT;
+  while (fgets(line, sizeof(line), file)) {
+    trim_newline(line);
+    char *cursor = line;
+    char *name = next_colon_field(&cursor);
+    char *password = next_colon_field(&cursor);
+    if (!name || !password || strcmp(name, username)) continue;
+    if (snprintf(hash, hash_size, "%s", password) >= (int)hash_size)
+      rc = -ENAMETOOLONG;
+    else
+      rc = 0;
+    break;
+  }
+  fclose(file);
+  return rc;
 }
 
 static bool constant_time_equal(const char *left, const char *right) {
@@ -48,29 +148,28 @@ static bool constant_time_equal(const char *left, const char *right) {
   return difference == 0;
 }
 
-static const char *password_hash(const struct passwd *entry) {
-  if (!entry) return NULL;
-  if (entry->pw_passwd && entry->pw_passwd[0] &&
-      strcmp(entry->pw_passwd, "x") && strcmp(entry->pw_passwd, "*"))
-    return entry->pw_passwd;
-  struct spwd *shadow = getspnam(entry->pw_name);
-  return shadow ? shadow->sp_pwdp : NULL;
-}
-
 int auth_verify_user(const char *username, const char *password,
                      char *error, size_t error_size) {
   if (!safe_username(username) || !password) {
     set_error(error, error_size, "invalid credentials");
     return -EINVAL;
   }
-  struct passwd *entry = getpwnam(username);
-  if (!entry || !user_is_authorized(entry)) {
+  struct account_record account;
+  if (account_by_name(username, &account) != 0 ||
+      role_for_username(username) == POSTMERKOS_ROLE_NONE) {
     set_error(error, error_size,
               "invalid credentials or account is not authorized for switch management");
     return -EACCES;
   }
-  const char *hash = password_hash(entry);
-  if (!hash || !*hash || hash[0] == '!' || hash[0] == '*') {
+  char hash[512];
+  if (account.password[0] && strcmp(account.password, "x") &&
+      strcmp(account.password, "*"))
+    snprintf(hash, sizeof(hash), "%s", account.password);
+  else if (shadow_hash(account.name, hash, sizeof(hash)) != 0) {
+    set_error(error, error_size, "account password is unavailable");
+    return -EACCES;
+  }
+  if (!hash[0] || hash[0] == '!' || hash[0] == '*') {
     set_error(error, error_size, "account password is locked or unavailable");
     return -EACCES;
   }
@@ -84,27 +183,27 @@ int auth_verify_user(const char *username, const char *password,
 
 struct json_object *auth_list_users(void) {
   struct json_object *users = json_object_new_array();
-  setpwent();
-  struct passwd *entry;
-  while ((entry = getpwent()) != NULL) {
-    if (!entry->pw_name || !safe_username(entry->pw_name) ||
-        !user_is_authorized(entry)) continue;
-    const char *shell = entry->pw_shell ? entry->pw_shell : "";
-    if (strstr(shell, "nologin") || strstr(shell, "false")) continue;
+  FILE *file = fopen(account_path("POSTMERKOS_PASSWD_FILE", "/etc/passwd"), "r");
+  if (!file) return users;
+  char line[ACCOUNT_LINE_MAX];
+  while (fgets(line, sizeof(line), file)) {
+    trim_newline(line);
+    struct account_record entry;
+    if (!parse_account_line(line, &entry) || !safe_username(entry.name)) continue;
+    enum postmerkos_role role = entry.uid == 0
+        ? POSTMERKOS_ROLE_ADMIN : role_for_username(entry.name);
+    if (role == POSTMERKOS_ROLE_NONE || strstr(entry.shell, "nologin") ||
+        strstr(entry.shell, "false")) continue;
     struct json_object *user = json_object_new_object();
-    json_object_object_add(user, "username",
-                           json_object_new_string(entry->pw_name));
-    json_object_object_add(user, "uid",
-                           json_object_new_int64((int64_t)entry->pw_uid));
-    json_object_object_add(user, "home",
-                           json_object_new_string(entry->pw_dir ? entry->pw_dir : ""));
-    json_object_object_add(user, "shell", json_object_new_string(shell));
-    enum postmerkos_role role = role_for_username(entry->pw_name);
+    json_object_object_add(user, "username", json_object_new_string(entry.name));
+    json_object_object_add(user, "uid", json_object_new_int64((int64_t)entry.uid));
+    json_object_object_add(user, "home", json_object_new_string(entry.home));
+    json_object_object_add(user, "shell", json_object_new_string(entry.shell));
     json_object_object_add(user, "role", json_object_new_string(role_name(role)));
     json_object_object_add(user, "capabilities", role_capabilities_json(role));
     json_object_array_add(users, user);
   }
-  endpwent();
+  fclose(file);
   return users;
 }
 
@@ -156,12 +255,10 @@ int auth_change_password(const char *actor, const char *target,
                          const char *actor_password,
                          const char *new_password,
                          char *error, size_t error_size) {
-  if (!safe_username(actor) || !safe_username(target)) {
-    set_error(error, error_size, "unknown user");
-    return -ENOENT;
-  }
-  struct passwd *target_entry = getpwnam(target);
-  if (!target_entry || !user_is_authorized(target_entry)) {
+  struct account_record actor_entry, target_entry;
+  if (!safe_username(actor) || !safe_username(target) ||
+      account_by_name(target, &target_entry) != 0 ||
+      role_for_username(target) == POSTMERKOS_ROLE_NONE) {
     set_error(error, error_size, "unknown or unauthorized target account");
     return -ENOENT;
   }
@@ -174,9 +271,8 @@ int auth_change_password(const char *actor, const char *target,
   }
   int rc = auth_verify_user(actor, actor_password, error, error_size);
   if (rc != 0) return rc;
-  struct passwd *actor_entry = getpwnam(actor);
-  if (!actor_entry) return -ENOENT;
-  if (actor_entry->pw_uid != 0 && strcmp(actor, target)) {
+  if (account_by_name(actor, &actor_entry) != 0) return -ENOENT;
+  if (actor_entry.uid != 0 && strcmp(actor, target)) {
     set_error(error, error_size, "only root may change another account");
     return -EACCES;
   }
@@ -185,7 +281,6 @@ int auth_change_password(const char *actor, const char *target,
     unlink("/config/postmerkos/default-password-active");
   return rc;
 }
-
 
 static int run_command(char *const argv[], char *error, size_t error_size) {
   pid_t child = fork();
@@ -200,8 +295,11 @@ static int run_command(char *const argv[], char *error, size_t error_size) {
     execvp(argv[0], argv); _exit(127);
   }
   int status = 0;
-  while (waitpid(child, &status, 0) < 0) if (errno != EINTR) { set_error(error, error_size, strerror(errno)); return -errno; }
-  if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) { set_error(error, error_size, "account operation failed"); return -EIO; }
+  while (waitpid(child, &status, 0) < 0)
+    if (errno != EINTR) { set_error(error, error_size, strerror(errno)); return -errno; }
+  if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+    set_error(error, error_size, "account operation failed"); return -EIO;
+  }
   return 0;
 }
 
@@ -212,8 +310,45 @@ static const char *role_group(const char *role) {
   return NULL;
 }
 
+static bool group_exists(const char *group) {
+  FILE *file = fopen(account_path("POSTMERKOS_GROUP_FILE", "/etc/group"), "r");
+  if (!file) return false;
+  char line[ACCOUNT_LINE_MAX];
+  bool exists = false;
+  while (fgets(line, sizeof(line), file)) {
+    char *colon = strchr(line, ':');
+    if (colon) *colon = '\0';
+    if (!strcmp(line, group)) { exists = true; break; }
+  }
+  fclose(file);
+  return exists;
+}
+
+static bool group_has_member(const char *group, const char *username) {
+  FILE *file = fopen(account_path("POSTMERKOS_GROUP_FILE", "/etc/group"), "r");
+  if (!file) return false;
+  char line[ACCOUNT_LINE_MAX];
+  bool member = false;
+  while (fgets(line, sizeof(line), file)) {
+    trim_newline(line);
+    char *cursor = line;
+    char *name = next_colon_field(&cursor);
+    (void)next_colon_field(&cursor);
+    (void)next_colon_field(&cursor);
+    char *members = next_colon_field(&cursor);
+    if (!name || strcmp(name, group)) continue;
+    char *member_save = NULL;
+    for (char *entry = members ? strtok_r(members, ",", &member_save) : NULL;
+         entry; entry = strtok_r(NULL, ",", &member_save))
+      if (!strcmp(entry, username)) { member = true; break; }
+    break;
+  }
+  fclose(file);
+  return member;
+}
+
 static int ensure_group(const char *group, char *error, size_t error_size) {
-  if (getgrnam(group)) return 0;
+  if (group_exists(group)) return 0;
   char *args[] = {"addgroup", (char *)group, NULL};
   return run_command(args, error, error_size);
 }
@@ -227,23 +362,29 @@ static int group_membership(const char *username, const char *group, bool add,
 
 int auth_set_role(const char *username, const char *role,
                   char *error, size_t error_size) {
-  if (!safe_username(username) || !getpwnam(username)) { set_error(error, error_size, "unknown user"); return -ENOENT; }
+  if (!safe_username(username) || !account_exists(username)) {
+    set_error(error, error_size, "unknown user"); return -ENOENT;
+  }
   if (!strcmp(username, "root")) {
-    if (!role || strcmp(role, "admin")) { set_error(error, error_size, "root must remain an administrator"); return -EPERM; }
+    if (!role || strcmp(role, "admin")) {
+      set_error(error, error_size, "root must remain an administrator"); return -EPERM;
+    }
     return 0;
   }
   const char *target = role_group(role);
-  if (!target) { set_error(error, error_size, "role must be admin, operator, or viewer"); return -EINVAL; }
+  if (!target) {
+    set_error(error, error_size, "role must be admin, operator, or viewer"); return -EINVAL;
+  }
   int rc = ensure_group(target, error, error_size); if (rc != 0) return rc;
   const char *groups[] = {"postmerkos-admin", "postmerkos-operator", "postmerkos-viewer"};
   for (size_t i = 0; i < 3; i++) {
-    struct group *group_entry = getgrnam(groups[i]);
-    bool member = false;
-    for (char **m = group_entry ? group_entry->gr_mem : NULL; m && *m; m++) if (!strcmp(*m, username)) member = true;
+    bool member = group_has_member(groups[i], username);
     if (!strcmp(groups[i], target)) {
-      if (!member && group_membership(username, groups[i], true, error, error_size) != 0) return -EIO;
+      if (!member && group_membership(username, groups[i], true, error, error_size) != 0)
+        return -EIO;
     } else if (member) {
-      char ignored[64] = {0}; group_membership(username, groups[i], false, ignored, sizeof(ignored));
+      char ignored[64] = {0};
+      group_membership(username, groups[i], false, ignored, sizeof(ignored));
     }
   }
   return 0;
@@ -251,22 +392,35 @@ int auth_set_role(const char *username, const char *role,
 
 int auth_create_user(const char *username, const char *password,
                      const char *role, char *error, size_t error_size) {
-  if (!safe_username(username) || getpwnam(username)) { set_error(error, error_size, "username is invalid or already exists"); return -EINVAL; }
-  if (!password || strlen(password) < 8 || strlen(password) > 128 || strchr(password, ':') || strchr(password, '\n')) {
-    set_error(error, error_size, "password must be 8-128 characters without ':' or line breaks"); return -EINVAL;
+  if (!safe_username(username) || account_exists(username)) {
+    set_error(error, error_size, "username is invalid or already exists"); return -EINVAL;
   }
-  if (!role_group(role)) { set_error(error, error_size, "role must be admin, operator, or viewer"); return -EINVAL; }
+  if (!password || strlen(password) < 8 || strlen(password) > 128 ||
+      strchr(password, ':') || strchr(password, '\n') || strchr(password, '\r')) {
+    set_error(error, error_size,
+              "password must be 8-128 characters without ':' or line breaks"); return -EINVAL;
+  }
+  if (!role_group(role)) {
+    set_error(error, error_size, "role must be admin, operator, or viewer"); return -EINVAL;
+  }
   char *args[] = {"adduser", "-D", "-s", "/bin/sh", (char *)username, NULL};
   int rc = run_command(args, error, error_size); if (rc != 0) return rc;
   rc = run_chpasswd(username, password, error, error_size);
   if (rc == 0) rc = auth_set_role(username, role, error, error_size);
-  if (rc != 0) { char *del[] = {"deluser", (char *)username, NULL}; char ignored[64]; run_command(del, ignored, sizeof(ignored)); }
+  if (rc != 0) {
+    char *del[] = {"deluser", (char *)username, NULL};
+    char ignored[64]; run_command(del, ignored, sizeof(ignored));
+  }
   return rc;
 }
 
 int auth_delete_user(const char *username, char *error, size_t error_size) {
-  if (!safe_username(username) || !getpwnam(username)) { set_error(error, error_size, "unknown user"); return -ENOENT; }
-  if (!strcmp(username, "root")) { set_error(error, error_size, "root cannot be deleted"); return -EPERM; }
+  if (!safe_username(username) || !account_exists(username)) {
+    set_error(error, error_size, "unknown user"); return -ENOENT;
+  }
+  if (!strcmp(username, "root")) {
+    set_error(error, error_size, "root cannot be deleted"); return -EPERM;
+  }
   char *args[] = {"deluser", (char *)username, NULL};
   return run_command(args, error, error_size);
 }

@@ -91,9 +91,8 @@ int main (int argc, char **argv) {
           if (argv[optind] == NULL) {
               port = 0;
           } else {
-              // optarg doesn't seem to work if the
-              // option has an optional value
-              // dirty workaround
+              /* GNU getopt does not populate optarg for this optional
+               * short-option value, so consume the next argument directly. */
               port = atoi(argv[optind]);
           }
           break;

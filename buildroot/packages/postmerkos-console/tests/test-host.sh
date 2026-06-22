@@ -16,6 +16,19 @@ cat >"$TMP/postmerkosctl" <<'MOCK'
 printf '%s\n' "$*" >>"$POSTMERKOS_TEST_LOG"
 role=${POSTMERKOS_TEST_ROLE:-administrator}
 case "$1" in
+  session)
+    [ "${POSTMERKOS_TEST_SESSION_FAIL:-0}" = 1 ] && { echo 'postmerkosctl: cannot connect to configd: Connection refused' >&2; exit 1; }
+    if [ "${2:-}" = --shell ]; then
+      case "$role" in
+        administrator) caps='status.read config.read firmware.history.read ports.write switching.write backup.create system.reboot system.poweroff firmware.update config.restore network.write users.manage services.manage terminal.exec system.factory_reset' ;;
+        operator) caps='status.read config.read firmware.history.read ports.write switching.write backup.create system.reboot' ;;
+        viewer) caps='status.read config.read firmware.history.read' ;;
+        *) caps='' ;;
+      esac
+      printf "POSTMERKOS_USERNAME='test'\nPOSTMERKOS_ROLE='%s'\nPOSTMERKOS_CAPABILITIES='%s'\n" "$role" "$caps"
+    else
+      echo "test ($role)"
+    fi ;;
   role) echo "$role" ;;
   has)
     case "$role:$2" in
@@ -42,6 +55,7 @@ case "$1" in
     esac ;;
   set|set-string|apply-json) echo 'Configuration accepted' ;;
   summary) echo 'Model: MS42P' ;;
+  services-summary) printf 'SERVICE       STATE       ENABLED     AUTOSTART\nSSH           running     yes         yes\n' ;;
   config) echo '{}' ;;
   *) echo '{}' ;;
 esac
@@ -68,4 +82,46 @@ POSTMERKOS_TEST_ROLE=viewer printf '2\n1\n1\n1\nb\nb\nb\nb\n0\n' |
 grep -q 'Read-only access' "$TMP/viewer.out"
 ! grep -q '3) Firmware Update' "$TMP/viewer.out"
 ! grep -q '8) Shell' "$TMP/viewer.out"
+
+# Service Management starts with a formatted table and does not dump JSON.
+printf '6
+b
+0
+' | POSTMERKOSCTL="$TMP/postmerkosctl" "$CONSOLE" menu >"$TMP/services.out"
+grep -q 'SERVICE       STATE' "$TMP/services.out"
+! grep -q '^{}$' "$TMP/services.out"
+# Operator receives backup/reboot but not administrator-only entries.
+printf '0
+' | POSTMERKOS_TEST_ROLE=operator POSTMERKOSCTL="$TMP/postmerkosctl" "$CONSOLE" menu >"$TMP/operator.out"
+grep -q '4) Backup & Restore' "$TMP/operator.out"
+grep -q '7) Power Control' "$TMP/operator.out"
+! grep -q '3) Firmware Update' "$TMP/operator.out"
+! grep -q '5) User Management' "$TMP/operator.out"
+! grep -q '6) Service Management' "$TMP/operator.out"
+! grep -q '8) Shell' "$TMP/operator.out"
+# Scriptable shell entry is denied to a viewer as well as hidden from the menu.
+if POSTMERKOS_TEST_ROLE=viewer POSTMERKOSCTL="$TMP/postmerkosctl" "$CONSOLE" shell >"$TMP/viewer-shell.out" 2>&1; then
+    echo 'viewer shell unexpectedly succeeded' >&2
+    exit 1
+fi
+grep -q 'Permission denied' "$TMP/viewer-shell.out"
+
+# A failed configd session lookup must not be misreported as a missing role.
+if printf '' | POSTMERKOS_SESSION_WAIT=1 POSTMERKOS_TEST_SESSION_FAIL=1 \
+  POSTMERKOSCTL="$TMP/postmerkosctl" "$CONSOLE" menu >"$TMP/unavailable.out" 2>&1; then
+    echo 'console unexpectedly accepted unavailable configd session' >&2; exit 1
+fi
+grep -q 'management service is unavailable' "$TMP/unavailable.out"
+! grep -q 'no postmerkOS management role' "$TMP/unavailable.out"
+# A successful role=none response remains a genuine authorization failure.
+if printf '' | POSTMERKOS_SESSION_WAIT=1 POSTMERKOS_TEST_ROLE=none \
+  POSTMERKOSCTL="$TMP/postmerkosctl" "$CONSOLE" menu >"$TMP/no-role.out" 2>&1; then
+    echo 'console unexpectedly accepted role=none' >&2; exit 1
+fi
+grep -q 'no postmerkOS management role' "$TMP/no-role.out"
+SERIAL=$(CDPATH= cd -- "$HERE/../files" && pwd)/postmerkos-serial-login
+for marker in 'login)' 'status)' 'logs)' 'reboot)' 'help|' 'management-health'; do
+  grep -Fq "$marker" "$SERIAL"
+done
+
 printf 'postmerkOS console role/navigation tests passed\n'

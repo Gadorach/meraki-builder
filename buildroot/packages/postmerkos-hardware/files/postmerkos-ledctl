@@ -1,30 +1,88 @@
 #!/bin/sh
 set -eu
-OWNER=/run/postmerkos/led-owner
-HANDLER=${POSTMERKOS_LED_HANDLER:-/click/sw0_ctrl/poe_led_state}
-mkdir -p /run/postmerkos
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+RUNDIR=${POSTMERKOS_RUN_DIR:-/run/postmerkos}
+HWPROBE=${POSTMERKOS_HWPROBE:-/usr/sbin/postmerkos-hwprobe}
+CTL=${POSTMERKOSCTL:-postmerkosctl}
+POE_LEDS=${POSTMERKOS_POE_LEDS:-poe_leds}
+OWNER=$RUNDIR/led-owner
+STATE=$RUNDIR/led-state
+ANIMATOR_PID=$RUNDIR/led-animator.pid
+CAP_ENV=$RUNDIR/led-capabilities.env
+RESTORE_GREEN=$RUNDIR/status-led-green.restore
+RESTORE_ORANGE=$RUNDIR/status-led-orange.restore
+mkdir -p "$RUNDIR"
+refresh_caps() {
+    "$HWPROBE" refresh >/dev/null 2>&1 || true
+    PORT_LED_AVAILABLE=0 PORT_LED_VERIFIED=0 PORT_LED_HANDLER=
+    STATUS_LED_AVAILABLE=0 STATUS_LED_VERIFIED=0 STATUS_LED_GREEN_PATH= STATUS_LED_ORANGE_PATH= STATUS_LED_PROTOCOL=named-state
+    [ -r "$CAP_ENV" ] && . "$CAP_ENV"
+}
 ports() {
-    p=$(postmerkosctl status 2>/dev/null | sed -n 's/.*"copper_ports"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' | head -n1)
-    [ -n "$p" ] || p=$(cat /tmp/NUM_PORTS 2>/dev/null || echo 0)
-    [ "$p" -gt 48 ] 2>/dev/null && p=48
+    p=$("$CTL" status 2>/dev/null | sed -n 's/.*"copper_ports"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' | sed -n '1p')
+    [ -n "$p" ] || p=0
+    [ "$p" -gt 8 ] 2>/dev/null && p=8
     echo "${p:-0}"
 }
-set_port() { [ -w "$HANDLER" ] && printf 'PORT %s, STATE %s\n' "$1" "$2" > "$HANDLER" 2>/dev/null || true; }
+write_named() { [ -w "$1" ] || return 1; printf 'STATE %s\n' "$2" >"$1"; }
+set_colour() {
+    colour=$1; state=${2:-1}
+    [ "$STATUS_LED_AVAILABLE" = 1 ] && [ "$STATUS_LED_VERIFIED" = 1 ] || return 1
+    case "$colour" in
+      green) write_named "$STATUS_LED_ORANGE_PATH" 0; write_named "$STATUS_LED_GREEN_PATH" "$state" ;;
+      orange) write_named "$STATUS_LED_GREEN_PATH" 0; write_named "$STATUS_LED_ORANGE_PATH" "$state" ;;
+      off) write_named "$STATUS_LED_GREEN_PATH" 0; write_named "$STATUS_LED_ORANGE_PATH" 0 ;;
+      *) return 1 ;;
+    esac
+}
+set_port() { [ "$PORT_LED_AVAILABLE" = 1 ] && [ "$PORT_LED_VERIFIED" = 1 ] || return 1; printf 'PORT %s, STATE %s\n' "$1" "$2" >"$PORT_LED_HANDLER"; }
+sleep_ms() { ms=$1; sleep "$(printf '%d.%03d' $((ms/1000)) $((ms%1000)))"; }
+owner_priority() { case "${1:-normal}" in fatal|error) echo 50;; firmware) echo 40;; reset) echo 30;; identify|identification) echo 20;; *) echo 0;; esac; }
+stop_animator() { if [ -s "$ANIMATOR_PID" ]; then pid=$(cat "$ANIMATOR_PID" 2>/dev/null || true); [ -n "$pid" ] && kill "$pid" 2>/dev/null || true; rm -f "$ANIMATOR_PID"; fi; }
+start_animator() { [ "$STATUS_LED_AVAILABLE" = 1 ] && [ "$STATUS_LED_VERIFIED" = 1 ] || return 1; if [ -s "$ANIMATOR_PID" ] && kill -0 "$(cat "$ANIMATOR_PID" 2>/dev/null)" 2>/dev/null; then return 0; fi; "$0" _animate >"$RUNDIR/ledctl.log" 2>&1 & echo $! >"$ANIMATOR_PID"; }
+animate() {
+    trap 'rm -f "$ANIMATOR_PID"; exit 0' EXIT HUP INT TERM
+    while [ -s "$OWNER" ] && [ -r "$STATE" ]; do
+      refresh_caps
+      mode=$(sed -n 's/^mode=//p' "$STATE" | sed -n '1p'); pct=$(sed -n 's/^progress=//p' "$STATE" | sed -n '1p')
+      case "$pct" in ''|*[!0-9]*) pct=0;; esac; [ "$pct" -gt 100 ] && pct=100
+      case "$mode" in
+        progress|reset)
+          [ "$mode" = reset ] && colour=orange || colour=green
+          cycle=$((2000 - 1200*pct/100)); on=$((500 - 200*pct/100))
+          set_colour "$colour" 1 || exit 0; sleep_ms "$on"; set_colour off 0 || exit 0; sleep_ms $((cycle-on)) ;;
+        error)
+          i=0; while [ "$i" -lt 3 ]; do set_colour orange 1 || exit 0; sleep_ms 250; set_colour off 0; sleep_ms 150; i=$((i+1)); done; sleep_ms 1000 ;;
+        *) exit 0;;
+      esac
+    done
+}
+port_progress() { pct=$1; n=$(ports); lit=$(( (n*pct+50)/100 )); i=1; while [ "$i" -le "$n" ]; do [ "$i" -le "$lit" ] && v=1 || v=0; set_port "$i" "$v" || true; i=$((i+1)); done; }
+restore_pair() {
+    if [ -r "$RESTORE_GREEN" ]; then v=$(cat "$RESTORE_GREEN" 2>/dev/null || echo 0); case "$v" in *1*) v=1;; *) v=0;; esac; write_named "$STATUS_LED_GREEN_PATH" "$v" || true; fi
+    if [ -r "$RESTORE_ORANGE" ]; then v=$(cat "$RESTORE_ORANGE" 2>/dev/null || echo 0); case "$v" in *1*) v=1;; *) v=0;; esac; write_named "$STATUS_LED_ORANGE_PATH" "$v" || true; fi
+    rm -f "$RESTORE_GREEN" "$RESTORE_ORANGE"
+}
 case "${1:-status}" in
-  capabilities)
-    if [ -w "$HANDLER" ]; then echo '{"mode":"binary-poe-ports","colors":false}'; else echo '{"mode":"unavailable","colors":false}'; fi ;;
-  acquire) printf '%s\n' "${2:-unknown}" > "$OWNER" ;;
-  release) [ ! -f "$OWNER" ] || [ "$(cat "$OWNER" 2>/dev/null)" = "${2:-}" ] && rm -f "$OWNER" ;;
-  all-off) n=$(ports); i=1; while [ "$i" -le "$n" ]; do set_port "$i" 0; i=$((i+1)); done ;;
-  all-on) n=$(ports); i=1; while [ "$i" -le "$n" ]; do set_port "$i" 1; i=$((i+1)); done ;;
-  progress)
-    pct=${2:-0}; n=$(ports); lit=$(( (n * pct + 50) / 100 )); i=1
-    while [ "$i" -le "$n" ]; do [ "$i" -le "$lit" ] && state=1 || state=0; set_port "$i" "$state"; i=$((i+1)); done ;;
-  error)
-    n=$(ports); count=0; while [ "$count" -lt 10 ]; do "$0" all-on; sleep 1; "$0" all-off; sleep 1; count=$((count+1)); done ;;
-  reset-step)
-    second=${2:-0}; n=$(ports); remain=$(( n - ((n * second + 9) / 10) )); [ "$remain" -lt 0 ] && remain=0
-    i=1; while [ "$i" -le "$n" ]; do [ "$i" -le "$remain" ] && state=1 || state=0; set_port "$i" "$state"; i=$((i+1)); done ;;
+  _animate) animate ;;
+  capabilities) refresh_caps; cat "$RUNDIR/hardware-controls.json" 2>/dev/null || echo '{"schema_version":2,"leds":{}}' ;;
+  acquire)
+    refresh_caps; owner=${2:-unknown}; current=$(cat "$OWNER" 2>/dev/null || true)
+    if [ -n "$current" ] && [ "$current" != "$owner" ]; then [ "$(owner_priority "$owner")" -gt "$(owner_priority "$current")" ] || exit 1; stop_animator; fi
+    if [ -z "$current" ] && [ "$STATUS_LED_AVAILABLE" = 1 ]; then cat "$STATUS_LED_GREEN_PATH" >"$RESTORE_GREEN" 2>/dev/null || echo 0 >"$RESTORE_GREEN"; cat "$STATUS_LED_ORANGE_PATH" >"$RESTORE_ORANGE" 2>/dev/null || echo 0 >"$RESTORE_ORANGE"; fi
+    printf '%s\n' "$owner" >"$OWNER" ;;
+  release)
+    refresh_caps; owner=${2:-}; current=$(cat "$OWNER" 2>/dev/null || true); [ -z "$owner" ] || [ "$current" = "$owner" ] || exit 1
+    stop_animator; rm -f "$OWNER" "$STATE"; restore_pair
+    [ "$PORT_LED_AVAILABLE" = 1 ] && command -v "$POE_LEDS" >/dev/null 2>&1 && "$POE_LEDS" >/dev/null 2>&1 || true ;;
+  progress|reset-progress)
+    refresh_caps; pct=${2:-0}; case "$pct" in ''|*[!0-9]*) pct=0;; esac; [ "$pct" -gt 100 ] && pct=100
+    if [ "$PORT_LED_AVAILABLE" = 1 ] && [ "$1" = progress ]; then port_progress "$pct"; else [ "$1" = reset-progress ] && mode=reset || mode=progress; printf 'mode=%s\nprogress=%s\n' "$mode" "$pct" >"$STATE"; start_animator || true; fi ;;
+  success) refresh_caps; stop_animator; set_colour green 1 || { [ "$PORT_LED_AVAILABLE" = 1 ] && port_progress 100 || true; } ;;
+  error) refresh_caps; printf 'mode=error\nprogress=100\n' >"$STATE"; start_animator || true ;;
+  all-on) refresh_caps; set_colour green 1 || port_progress 100 || true ;;
+  all-off) refresh_caps; set_colour off 0 || port_progress 0 || true ;;
   status) [ -f "$OWNER" ] && cat "$OWNER" || echo normal ;;
-  *) echo 'usage: postmerkos-ledctl capabilities|acquire OWNER|release OWNER|progress PCT|error|reset-step SECOND|all-on|all-off|status' >&2; exit 2 ;;
+  test-status) refresh_caps; [ "$STATUS_LED_AVAILABLE" = 1 ] || { echo 'No exact-model dual status LED handlers are available.' >&2; exit 1; }; set_colour green 1; sleep 1; set_colour orange 1; sleep 1; set_colour off 0 ;;
+  *) echo 'usage: postmerkos-ledctl capabilities|acquire OWNER|release [OWNER]|progress PCT|reset-progress PCT|success|error|all-on|all-off|status|test-status' >&2; exit 2 ;;
 esac

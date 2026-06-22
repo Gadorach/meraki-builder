@@ -1,0 +1,21 @@
+#!/bin/sh
+STATUS=${FWUPDATE_STATUS_FILE:-/run/fwupdate/status.json}
+case "${1:-}" in
+    --watch|-w)
+        last=""
+        while :; do
+            current=$(cat "$STATUS" 2>/dev/null || echo '{"state":"idle","stage":"idle","progress":0,"message":"No update is active"}')
+            if [ "$current" != "$last" ]; then
+                printf '%s\n' "$current"
+                last=$current
+            fi
+            sleep 1
+        done
+        ;;
+    --log)
+        cat /run/fwupdate/update.log /run/fwupdate/flash.log 2>/dev/null
+        ;;
+    *)
+        cat "$STATUS" 2>/dev/null || printf '%s\n' '{"state":"idle","stage":"idle","progress":0,"message":"No update is active"}'
+        ;;
+esac

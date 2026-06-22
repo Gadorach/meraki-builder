@@ -123,6 +123,8 @@ struct json_object *service_policy_load(void) {
   return policy;
 }
 
+static bool process_running(const char *name);
+
 static const char *service_pattern(const char *service) {
   if (!strcmp(service, "ssh")) return "dropbear";
   if (!strcmp(service, "web")) return "uhttpd";
@@ -130,20 +132,38 @@ static const char *service_pattern(const char *service) {
   return NULL;
 }
 
+static const char *init_directory(void) {
+  const char *path = getenv("POSTMERKOS_INIT_DIR");
+  return path && *path ? path : "/etc/init.d";
+}
+
+static const char *proc_directory(void) {
+  const char *path = getenv("POSTMERKOS_PROC_DIR");
+  return path && *path ? path : "/proc";
+}
+
 static int find_init_script(const char *pattern, char *path, size_t path_size) {
-  DIR *dir = opendir("/etc/init.d");
+  const char *base = init_directory();
+  DIR *dir = opendir(base);
   if (!dir) return -errno;
   struct dirent *entry;
   int rc = -ENOENT;
   while ((entry = readdir(dir)) != NULL) {
     if (entry->d_name[0] != 'S' || !strstr(entry->d_name, pattern)) continue;
-    if (snprintf(path, path_size, "/etc/init.d/%s", entry->d_name) >= (int)path_size)
+    if (snprintf(path, path_size, "%s/%s", base, entry->d_name) >= (int)path_size)
       rc = -ENAMETOOLONG;
     else rc = 0;
     break;
   }
   closedir(dir);
   return rc;
+}
+
+static const char *service_process_name(const char *service) {
+  if (!strcmp(service, "ssh")) return "dropbear";
+  if (!strcmp(service, "web")) return "uhttpd";
+  if (!strcmp(service, "chrony")) return "chronyd";
+  return NULL;
 }
 
 static int run_script(const char *path, const char *action) {
@@ -161,6 +181,11 @@ int service_action(const char *service, const char *action, char *error, size_t 
       strcmp(action, "restart"))) {
     set_error(error, error_size, "unknown service or action"); return -EINVAL;
   }
+  const char *process = service_process_name(service);
+  bool running = process && process_running(process);
+  if ((!strcmp(action, "start") && running) ||
+      (!strcmp(action, "stop") && !running)) return 0;
+
   char path[256];
   int rc = find_init_script(pattern, path, sizeof(path));
   if (rc != 0) { set_error(error, error_size, "service init script is not installed"); return rc; }
@@ -170,14 +195,15 @@ int service_action(const char *service, const char *action, char *error, size_t 
 }
 
 static bool process_running(const char *name) {
-  DIR *proc = opendir("/proc");
+  const char *base = proc_directory();
+  DIR *proc = opendir(base);
   if (!proc) return false;
   struct dirent *entry;
   bool running = false;
   while ((entry = readdir(proc)) != NULL && !running) {
     if (entry->d_name[0] < '0' || entry->d_name[0] > '9') continue;
     char path[320], command[64] = {0};
-    snprintf(path, sizeof(path), "/proc/%s/comm", entry->d_name);
+    snprintf(path, sizeof(path), "%s/%s/comm", base, entry->d_name);
     FILE *file = fopen(path, "r");
     if (!file) continue;
     if (fgets(command, sizeof(command), file)) {
@@ -201,8 +227,8 @@ static int write_dropbear_defaults(struct json_object *ssh) {
   return rc;
 }
 
-int service_policy_apply(char *error, size_t error_size) {
-  struct json_object *policy = service_policy_load();
+static int service_policy_apply_object(struct json_object *policy,
+                                       char *error, size_t error_size) {
   if (!policy) { set_error(error, error_size, "service policy unavailable"); return -ENOENT; }
   struct json_object *ssh = member(policy, "ssh");
   int rc = write_dropbear_defaults(ssh);
@@ -220,9 +246,17 @@ int service_policy_apply(char *error, size_t error_size) {
     char local_error[128] = {0};
     int action_rc = service_action(names[i], desired ? "start" : "stop",
                                    local_error, sizeof(local_error));
-    if (action_rc != 0 && action_rc != -ENOENT && rc == 0) rc = action_rc;
+    if (action_rc != 0 && rc == 0) rc = action_rc;
   }
-  if (rc != 0 && error && !*error) set_error(error, error_size, "one or more service settings could not be applied");
+  if (rc != 0 && error && !*error)
+    set_error(error, error_size, "one or more service settings could not be applied");
+  return rc;
+}
+
+int service_policy_apply(char *error, size_t error_size) {
+  struct json_object *policy = service_policy_load();
+  if (!policy) { set_error(error, error_size, "service policy unavailable"); return -ENOENT; }
+  int rc = service_policy_apply_object(policy, error, error_size);
   json_object_put(policy);
   return rc;
 }
@@ -230,10 +264,31 @@ int service_policy_apply(char *error, size_t error_size) {
 int service_policy_save(struct json_object *policy, char *error, size_t error_size) {
   int rc = validate_policy(policy, error, error_size);
   if (rc != 0) return rc;
+  struct json_object *previous = service_policy_load();
+
+  /* Apply before persist.  A desired policy is not committed unless its
+   * observable service state can be established. */
+  rc = service_policy_apply_object(policy, error, error_size);
+  if (rc != 0) {
+    char rollback_error[128] = {0};
+    if (previous) service_policy_apply_object(previous, rollback_error,
+                                              sizeof(rollback_error));
+    if (previous) json_object_put(previous);
+    return rc;
+  }
+
   ensure_parent();
   rc = atomic_json_write(SERVICE_POLICY_PATH, policy);
-  if (rc != 0) { set_error(error, error_size, strerror(-rc)); return rc; }
-  return service_policy_apply(error, error_size);
+  if (rc != 0) {
+    char rollback_error[128] = {0};
+    if (previous) service_policy_apply_object(previous, rollback_error,
+                                              sizeof(rollback_error));
+    if (previous) json_object_put(previous);
+    set_error(error, error_size, strerror(-rc));
+    return rc;
+  }
+  if (previous) json_object_put(previous);
+  return 0;
 }
 
 struct json_object *service_status_json(void) {
@@ -244,9 +299,19 @@ struct json_object *service_status_json(void) {
   for (size_t i = 0; i < 3; i++) {
     struct json_object *entry = member(policy, names[i]);
     struct json_object *status = json_object_new_object();
+    bool desired = bool_member(entry, "enabled", true) &&
+                   bool_member(entry, "autostart", true);
+    if (!strcmp(names[i], "chrony")) {
+      struct json_object *time = time_policy_load();
+      desired = desired && bool_member(time, "ntp_enabled", true);
+      if (time) json_object_put(time);
+    }
+    bool observed = process_running(processes[i]);
     json_object_object_add(status, "enabled", json_object_new_boolean(bool_member(entry, "enabled", true)));
     json_object_object_add(status, "autostart", json_object_new_boolean(bool_member(entry, "autostart", true)));
-    json_object_object_add(status, "running", json_object_new_boolean(process_running(processes[i])));
+    json_object_object_add(status, "desired_running", json_object_new_boolean(desired));
+    json_object_object_add(status, "running", json_object_new_boolean(observed));
+    json_object_object_add(status, "in_sync", json_object_new_boolean(desired == observed));
     if (!strcmp(names[i], "ssh")) {
       json_object_object_add(status, "password_auth", json_object_new_boolean(bool_member(entry, "password_auth", true)));
       json_object_object_add(status, "port", json_object_new_int(int_member(entry, "port", 22)));

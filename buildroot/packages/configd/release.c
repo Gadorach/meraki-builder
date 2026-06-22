@@ -4,6 +4,7 @@
 #include <string.h>
 
 static char cached_version[64];
+static char cached_compatibility[40];
 
 struct json_object *release_info_load(void) {
   const char *path = getenv("POSTMERKOS_RELEASE_FILE");
@@ -30,4 +31,22 @@ const char *release_version(void) {
   snprintf(cached_version, sizeof(cached_version), "%s", version);
   json_object_put(release);
   return cached_version;
+}
+
+
+const char *release_model_compatibility(const char *model) {
+  cached_compatibility[0] = '\0';
+  if (!model || !*model) return NULL;
+  struct json_object *release = release_info_load();
+  struct json_object *models = NULL;
+  struct json_object *state = NULL;
+  if (json_object_object_get_ex(release, "models", &models) &&
+      json_object_is_type(models, json_type_object) &&
+      json_object_object_get_ex(models, model, &state) &&
+      json_object_is_type(state, json_type_string)) {
+    snprintf(cached_compatibility, sizeof(cached_compatibility), "%s",
+             json_object_get_string(state));
+  }
+  json_object_put(release);
+  return cached_compatibility[0] ? cached_compatibility : NULL;
 }

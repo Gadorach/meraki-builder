@@ -8,31 +8,55 @@
 # switch_brain with a BLANK configuration
 #
 
+RUN_DIR=${POSTMERKOS_RUN_DIR:-/run/postmerkos}
+MODULE_PROFILE=${POSTMERKOS_MODULE_PROFILE:-$RUN_DIR/module-profile}
+STATUS=${POSTMERKOS_CLICK_CONFIG_STATUS:-$RUN_DIR/click-config.status}
+
+status_write() {
+    state=$1; shift
+    mkdir -p "$RUN_DIR"
+    { printf 'state=%s\n' "$state"; printf 'message=%s\n' "$*"; } > "$STATUS.tmp.$$"
+    mv -f "$STATUS.tmp.$$" "$STATUS"
+}
+
+fail() {
+    echo "postmerkOS Click config: ERROR: $*" >&2
+    status_write failed "$*"
+    return 1
+}
+
+valid_mac() {
+    mac=$(printf '%s' "$1" | tr 'A-F' 'a-f')
+    echo "$mac" | grep -Eq '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' || return 1
+    [ "$mac" != 00:00:00:00:00:00 ] && [ "$mac" != ff:ff:ff:ff:ff:ff ] || return 1
+    first=${mac%%:*}
+    [ $((0x$first & 1)) -eq 0 ]
+}
+
+required_handlers() {
+    for path in \
+      /click/client_ip_table/boot_count \
+      /click/switch_port_table/set_vlan_allports_conf \
+      /click/switch_port_table/set_port_phy_cfgs \
+      /click/stp/set_params \
+      /click/set_host_ip/run \
+      /click/set_host_ip6/run; do
+        [ -e "$path" ] || { fail "required handler unavailable: $path"; return 1; }
+    done
+}
+
 start() {
-    if [ -f /tmp/NUM_PORTS ]; then
-        NUM_PORTS=$(cat /tmp/NUM_PORTS)
-	echo "Switch port count: ${NUM_PORTS}"
-    else
-        # fail-safe value is MS220-8P NUM_PORTS
-        NUM_PORTS=10
-	echo "Default port count: ${NUM_PORTS}"
-    fi
+    [ -r "$MODULE_PROFILE" ] || { fail 'module profile is unavailable'; return 1; }
+    . "$MODULE_PROFILE"
+    case ${LOGICAL_PORTS:-} in ''|*[!0-9]*) fail 'invalid logical port count in module profile'; return 1 ;; esac
+    NUM_PORTS=$(cat /tmp/NUM_PORTS 2>/dev/null || true)
+    [ "$NUM_PORTS" = "$LOGICAL_PORTS" ] || { fail 'stale or missing /tmp/NUM_PORTS'; return 1; }
+    echo "postmerkOS Click config: switch model $MODEL, port count $NUM_PORTS"
 
-    sysctl -w net.ipv4.ip_local_reserved_ports=50000-50127
-
-    # Check to see if vc_click module has loaded
-    lsmod | grep -q vc_click
-
-    if [ $? -ne 0 ]; then
-        echo "vc_click isn't loaded; aborting!"
-        exit
-    elif [ ! -d /click/client_ip_table ]; then
-        echo "vc_click is loaded, but something is wrong with the /click configuration; aborting!"
-        exit
-    fi
-
-    # enable link lights on luton
-    echo -e link > /click/sw0_ctrl/led_mode
+    sysctl -w net.ipv4.ip_local_reserved_ports=50000-50127 >/dev/null 2>&1 || true
+    grep -q '^vc_click ' /proc/modules 2>/dev/null || { fail 'vc_click is not loaded'; return 1; }
+    [ -d /click/client_ip_table ] || { fail 'Click graph is unavailable'; return 1; }
+    required_handlers || return 1
 
     echo -e "0" > /click/client_ip_table/boot_count
     echo -e "1" > /click/switch_port_table/snooptable_version
@@ -68,10 +92,12 @@ start() {
 
     # set DHCP VLANs for the number of ports present
     if [ -f /etc/default/switch_dhcp ]; then
-      DHCP_VLAN=$(cat /etc/default/switch_dhcp | grep DHCP_VLAN | awk -F'=' '{print $2}')
+      DHCP_VLAN=$(awk -F= '/^DHCP_VLAN=/{print $2; exit}' /etc/default/switch_dhcp)
     else
       DHCP_VLAN=1
     fi
+    case "$DHCP_VLAN" in ''|*[!0-9]*) DHCP_VLAN=1 ;; esac
+    [ "$DHCP_VLAN" -ge 1 ] 2>/dev/null && [ "$DHCP_VLAN" -le 4094 ] 2>/dev/null || DHCP_VLAN=1
     echo -e "$DHCP_VLAN" > /click/uplinkstate/preferred_dhcp_vid
     dhcp_vlan_var=$DHCP_VLAN
     for i in $(seq 2 $NUM_PORTS); do dhcp_vlan_var="$dhcp_vlan_var $DHCP_VLAN"; done
@@ -95,7 +121,8 @@ start() {
     echo -e "false" > /click/set_cdp_steal/run
     echo -e "PRIORITY 61440, HELLO_TIME 2, FORWARD_DELAY 15, MAX_AGE 20, HOLDCOUNT 6" > /click/stp/set_params
     echo -e "true" > /click/switch_port_table/enable_lacp_on_single_ports
-    MAC=$(cat /tmp/MERAKI_MAC)
+    MAC=$(cat /tmp/MERAKI_MAC 2>/dev/null || true)
+    valid_mac "$MAC" || { fail 'management MAC is invalid'; return 1; }
     for i in $(seq 1 $NUM_PORTS); do
       echo -e "PORT $MAC/$i, ENABLED true, AUTOEDGE true, EDGE false, AUTOPTP true, PTP false, PRI 128, COST 0" > /click/stp/set_many_port_cfgs
     done
@@ -208,11 +235,11 @@ start() {
     # waits a bounded period for DHCP before applying the fallback address.
     CONFIGD_OWNS_NETWORK=0
     if [ -x /bin/configd ]; then
-      if /bin/configd -N -W "${CONFIGD_NETWORK_WAIT:-60}" \
+      if /bin/configd -N --boot-output -W "${CONFIGD_NETWORK_WAIT:-60}" \
           -c /etc/switch.json; then
         CONFIGD_OWNS_NETWORK=1
       else
-        echo "configd network bootstrap failed; using legacy DHCP bootstrap"
+        echo "configd network bootstrap failed; using the bounded Click DHCP fallback"
       fi
     fi
 
@@ -234,7 +261,7 @@ start() {
         if [ "$TRIES" -gt 60 ]; then
           MY_IP=169.254.0.10
           PREFIX=16
-          GATEWAY=169.254.0.1
+          GATEWAY=0.0.0.0
           BROADCAST=169.254.255.255
           break
         fi
@@ -246,7 +273,9 @@ start() {
       echo "Using IP address: $MY_IP/$PREFIX"
       echo -e "$MY_IP $PREFIX $GATEWAY 1500 $BROADCAST 1" > /click/set_host_ip/run
     fi
-    echo -e "fe80::8a15:44ff:fe23:1115 :: 0 :: 1500 0" > /click/set_host_ip6/run
+    HOST_IP6=$(cat /tmp/MERAKI_IP6 2>/dev/null || true)
+    [ -n "$HOST_IP6" ] || { fail 'derived management IPv6 address is unavailable'; return 1; }
+    echo -e "$HOST_IP6 :: 0 :: 1500 0" > /click/set_host_ip6/run || { fail 'failed to program management IPv6 address'; return 1; }
     # consider removing mtun
     echo -e "0" > /click/mtun_client_state/static_ip_failover
     echo -e "0" > /click/mtun_client_state/dhcp_vlan_failover
@@ -268,6 +297,8 @@ start() {
     echo -e "false" > /click/wan0_dns_nxlookup/active
     # consider removing mtun
     echo -e "gateway_good 0" > /click/mtun_client_state/update_node_state
+    status_write ready "Click configuration applied for $MODEL"
+    return 0
 }
 
 stop() {

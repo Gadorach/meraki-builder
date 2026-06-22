@@ -1,9 +1,16 @@
 #!/bin/sh
+LOG=/run/postmerkos/hardware.log
 case "${1:-start}" in
   start)
-    /usr/sbin/postmerkos-buttond >/run/postmerkos/buttond.log 2>&1 &
+    mkdir -p /run/postmerkos
+    /usr/sbin/postmerkos-hwprobe refresh >>"$LOG" 2>&1 || true
     /usr/sbin/postmerkos-poe-prune >/run/postmerkos/poe-prune.log 2>&1 &
     ;;
-  stop) killall postmerkos-buttond postmerkos-poe-prune >/dev/null 2>&1 || true ;;
-  restart) "$0" stop; "$0" start ;;
+  stop)
+    killall postmerkos-poe-prune >/dev/null 2>&1 || true
+    /usr/sbin/postmerkos-ledctl release >/dev/null 2>&1 || true
+    ;;
+  restart) "$0" stop; sleep 1; "$0" start ;;
+  status) [ -r /run/postmerkos/hardware-controls.json ] ;;
+  *) echo "Usage: $0 {start|stop|restart|status}"; exit 1 ;;
 esac

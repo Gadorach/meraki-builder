@@ -1,0 +1,58 @@
+#!/bin/sh
+# Bounded configd supervisor. It preserves exit diagnostics and avoids silent
+# post-start WebSocket failures without creating an unbounded crash loop.
+set -u
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+DAEMON=${CONFIGD_DAEMON:-/bin/configd}
+CHILD_PIDFILE=${CONFIGD_CHILD_PIDFILE:-/run/configd.pid}
+STOP_FILE=${CONFIGD_STOP_FILE:-/run/postmerkos/configd.stop}
+CONFIG=${CONFIGD_CONFIG:-/etc/switch.json}
+SOCKET=${CONFIGD_SOCKET:-/run/postmerkos/configd.sock}
+PORT=${CONFIGD_WEBSOCKET_PORT:-4001}
+INTERVAL=${CONFIGD_STATUS_INTERVAL:-3}
+EXIT_FILE=${CONFIGD_EXIT_FILE:-/run/postmerkos/configd.exit}
+CONSOLE=${CONFIGD_CONSOLE:-/dev/console}
+MAX_RESTARTS=${CONFIGD_MAX_RESTARTS:-3}
+WINDOW=${CONFIGD_RESTART_WINDOW:-60}
+child=
+stopping=0
+notify() {
+    echo "$*"
+    [ -w "$CONSOLE" ] && echo "$*" >"$CONSOLE" 2>/dev/null || true
+}
+cleanup() {
+    stopping=1
+    [ -n "${child:-}" ] && kill "$child" 2>/dev/null || true
+    [ -n "${child:-}" ] && wait "$child" 2>/dev/null || true
+    rm -f "$CHILD_PIDFILE"
+}
+trap cleanup EXIT HUP INT TERM
+mkdir -p /run/postmerkos
+rm -f "$STOP_FILE"
+window_start=$(date +%s 2>/dev/null || echo 0)
+restarts=0
+while [ "$stopping" -eq 0 ] && [ ! -e "$STOP_FILE" ]; do
+    rm -f "$EXIT_FILE"
+    "$DAEMON" -c "$CONFIG" -s "$SOCKET" -w "$PORT" -p "$INTERVAL" &
+    child=$!
+    printf '%s\n' "$child" >"$CHILD_PIDFILE"
+    wait "$child"
+    rc=$?
+    rm -f "$CHILD_PIDFILE" "$SOCKET"
+    [ "$stopping" -eq 0 ] && [ ! -e "$STOP_FILE" ] || exit 0
+    reason=unknown
+    [ -r "$EXIT_FILE" ] && reason=$(sed -n 's/^reason=//p' "$EXIT_FILE" | sed -n '1p')
+    now=$(date +%s 2>/dev/null || echo 0)
+    notify "postmerkOS management: WARN configd exited rc=$rc reason=$reason"
+    if [ $((now - window_start)) -gt "$WINDOW" ]; then
+        window_start=$now
+        restarts=0
+    fi
+    restarts=$((restarts + 1))
+    if [ "$restarts" -gt "$MAX_RESTARTS" ]; then
+        notify "postmerkOS management: FAIL configd exceeded $MAX_RESTARTS restarts in ${WINDOW}s"
+        exit 1
+    fi
+    notify "postmerkOS management: restarting configd attempt=$restarts/$MAX_RESTARTS"
+    sleep 2
+done

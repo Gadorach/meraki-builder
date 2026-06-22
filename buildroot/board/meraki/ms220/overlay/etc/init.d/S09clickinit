@@ -1,82 +1,153 @@
 #!/bin/sh
-#
-# Copyright (C) Hal Martin (github.com/halmartin)
-#
-# Mount click filesystem for managing the Vitesse ASIC
-#
+# Mount ClickFS and load the model-selected switch graph.
+set -u
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+RUN_DIR=${POSTMERKOS_RUN_DIR:-/run/postmerkos}
+BOARDINFO=${POSTMERKOS_BOARDINFO:-$RUN_DIR/boardinfo}
+MODULE_PROFILE=${POSTMERKOS_MODULE_PROFILE:-$RUN_DIR/module-profile}
+MAC_FILE=${POSTMERKOS_MAC_FILE:-/config/postmerkos/MERAKI_MAC}
+TMP_MAC=${POSTMERKOS_TMP_MAC:-/tmp/MERAKI_MAC}
+TEMPLATE=${POSTMERKOS_SWITCH_TEMPLATE:-/etc/switch.template.gz}
+STATUS=${POSTMERKOS_CLICK_INIT_STATUS:-$RUN_DIR/click-init.status}
 
-get_mac_addr() {
-    MAC=""
-    if [ -f /bin/board_data ]; then
-        MAC=$(/bin/board_data mac)
-    else
-        if [ -f /sys/devices/platform/i2c-gpio.1/i2c-1/1-0051/eeprom ]; then
-            MAC=$(dd if=/sys/devices/platform/i2c-gpio.1/i2c-1/1-0051/eeprom bs=6 skip=17 count=1 2>/dev/null | hexdump -C | head -1 | awk '{print $2,$3,$4,$5,$6,$7}' | tr ' ' ':')
-        fi
+log() { echo "postmerkOS Click: $*"; }
+fail() { log "ERROR: $*" >&2; write_status failed "$*"; return 1; }
+write_status() {
+    state=$1; shift
+    mkdir -p "$RUN_DIR"
+    { printf 'state=%s\n' "$state"; printf 'message=%s\n' "$*"; } > "$STATUS.tmp.$$"
+    mv -f "$STATUS.tmp.$$" "$STATUS"
+}
+
+valid_mac() {
+    mac=$(printf '%s' "$1" | tr 'A-F' 'a-f')
+    echo "$mac" | grep -Eq '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' || return 1
+    [ "$mac" != 00:00:00:00:00:00 ] && [ "$mac" != ff:ff:ff:ff:ff:ff ] || return 1
+    first=${mac%%:*}
+    [ $((0x$first & 1)) -eq 0 ]
+}
+
+derive_mac_from_text() {
+    text=$1
+    digest=$(printf '%s' "$text" | sha256sum 2>/dev/null | awk '{print $1}')
+    [ ${#digest} -ge 10 ] || return 1
+    # Locally administered, unicast.
+    printf '02:%s:%s:%s:%s:%s\n' \
+        "${digest#??}" | awk -F: '{print $1}' >/dev/null 2>&1 || true
+    printf '02:%s:%s:%s:%s:%s\n' \
+        "$(printf '%s' "$digest" | cut -c1-2)" \
+        "$(printf '%s' "$digest" | cut -c3-4)" \
+        "$(printf '%s' "$digest" | cut -c5-6)" \
+        "$(printf '%s' "$digest" | cut -c7-8)" \
+        "$(printf '%s' "$digest" | cut -c9-10)"
+}
+
+select_mac() {
+    mac=
+    if [ -r "$MAC_FILE" ]; then mac=$(sed -n '1p' "$MAC_FILE" | tr -d '\r\n'); fi
+    if ! valid_mac "$mac"; then
+        mac=
+        if [ -r "$BOARDINFO" ]; then mac=$(sed -n 's/^MAC=//p' "$BOARDINFO" | sed -n '1p'); fi
     fi
-    if [ -z ${MAC} ] || [ $(echo "$MAC" | grep -Ec '([0-9a-f]{2}:){5}[0-9a-f]{2}') -ne 1 ]; then
-        # the MAC is empty or invalid
-        MAC=$(echo 88:15:44:$(echo $RANDOM | cut -c0-2):$(echo $RANDOM | cut -c0-2):$(echo $RANDOM | cut -c0-2))
+    if ! valid_mac "$mac"; then
+        mac=$(board_data mac 2>/dev/null || true)
     fi
-    echo $MAC
+    if ! valid_mac "$mac"; then
+        serial=$(sed -n 's/^SERIAL=//p' "$BOARDINFO" 2>/dev/null | sed -n '1p')
+        [ -n "$serial" ] || serial=$(board_data serial 2>/dev/null || true)
+        [ -n "$serial" ] && mac=$(derive_mac_from_text "$serial" 2>/dev/null || true)
+    fi
+    if ! valid_mac "$mac"; then
+        seed=$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')
+        mac=$(derive_mac_from_text "$seed" 2>/dev/null || true)
+    fi
+    valid_mac "$mac" || return 1
+    printf '%s\n' "$(printf '%s' "$mac" | tr 'A-F' 'a-f')"
+}
+
+mac_to_internal_ipv4() {
+    echo "$1" | awk -F: '{printf "6.%d.%d.%d\n", "0x"$4, "0x"$5, "0x"$6}'
+}
+
+mac_to_eui64_linklocal() {
+    echo "$1" | awk -F: '{
+      first=("0x"$1)+0; first=xor(first,2);
+      printf "fe80::%02x%02x:%02xff:fe%02x:%02x%02x\n", first,("0x"$2)+0,("0x"$3)+0,("0x"$4)+0,("0x"$5)+0,("0x"$6)+0
+    }' 2>/dev/null || return 1
+}
+
+# BusyBox awk may not expose xor(); use shell arithmetic as a portable fallback.
+mac_to_eui64_linklocal_shell() {
+    oldifs=$IFS; IFS=:
+    set -- $1
+    IFS=$oldifs
+    first=$(printf '%02x' $((0x$1 ^ 2)))
+    printf 'fe80::%s%s:%sff:fe%s:%s%s\n' "$first" "$2" "$3" "$4" "$5" "$6"
+}
+
+required_graph_contract() {
+    for path in \
+      /click/config \
+      /click/sw0_ctrl \
+      /click/switch_port_table \
+      /click/set_host_ip/run \
+      /click/uplinkstate; do
+        [ -e "$path" ] || { fail "required Click handler is unavailable: $path"; return 1; }
+    done
 }
 
 start() {
-    if [ ! -f /etc/MERAKI_MAC ]; then
-        # generate it to /tmp/, just in case the overlay mount failed
-        # and /etc isn't writable
-        echo $(get_mac_addr) > /tmp/MERAKI_MAC
-        cp /tmp/MERAKI_MAC /etc/
-    else
-        cp /etc/MERAKI_MAC /tmp/
+    mkdir -p "$RUN_DIR" "$(dirname "$MAC_FILE")"
+    [ -r "$MODULE_PROFILE" ] || { fail 'module profile is unavailable'; return 1; }
+    . "$MODULE_PROFILE"
+    case ${LOGICAL_PORTS:-} in ''|*[!0-9]*) fail 'module profile has an invalid port count'; return 1 ;; esac
+    [ "$(cat /tmp/NUM_PORTS 2>/dev/null || true)" = "$LOGICAL_PORTS" ] || {
+        fail 'module profile and /tmp/NUM_PORTS disagree'; return 1;
+    }
+    grep -q '^vc_click ' /proc/modules 2>/dev/null || { fail 'vc_click is not loaded'; return 1; }
+    grep -qw click /proc/filesystems 2>/dev/null || { fail 'Click filesystem is unavailable'; return 1; }
+
+    mac=$(select_mac) || { fail 'could not establish a valid unicast management MAC'; return 1; }
+    printf '%s\n' "$mac" > "$TMP_MAC.tmp.$$" && mv -f "$TMP_MAC.tmp.$$" "$TMP_MAC"
+    if [ ! -r "$MAC_FILE" ] || [ "$(cat "$MAC_FILE" 2>/dev/null)" != "$mac" ]; then
+        printf '%s\n' "$mac" > "$MAC_FILE.tmp.$$" && chmod 0600 "$MAC_FILE.tmp.$$" && mv -f "$MAC_FILE.tmp.$$" "$MAC_FILE"
     fi
-    echo "Using MAC address: $(cat /tmp/MERAKI_MAC)"
-    # extract the bottom three octets to use as IP
-    # Meraki's logic, not mine
-    cat /tmp/MERAKI_MAC | sed -n 's/.*:.*:.*:\([0-9A-Za-z:]*\):\([0-9A-Za-z:]*\):\([0-9A-Za-z:]*\).*/printf 6.%d.%d.%d\\\\n 0x\1 0x\2 0x\3/p' | xargs -0 sh -c > /tmp/MERAKI_IP
-    cat /tmp/MERAKI_MAC | sed -n 's/\([0-9A-Za-z]*\):\([0-9A-Za-z]*\):\([0-9A-Za-z]*\):\([0-9A-Za-z]*\):\([0-9A-Za-z]*\):\([0-9A-Za-z]*\).*/printf fd0a:9b09:1f7:0:%02x%02x:%xff:fe%02x:%02x%02x $((0x\1^0x2)) 0x\2 0x\3 0x\4 0x\5 0x\6/p' | xargs -0 sh -c > /tmp/MERAKI_IP6
-    # set the hostname based on the MAC address
-    # Meraki does this in S10boot
-    sysctl -qw kernel.hostname=$(echo m$(cat /tmp/MERAKI_MAC) | sed -e 's/://g')
-    if fgrep -q click /proc/filesystems; then
-        mount -t click none /click
-        # restore the default click configuration
-        if [ -f /etc/switch.template.gz ]; then
-            if [ -f /tmp/NUM_PORTS ]; then
-                NUM_PORTS=$(cat /tmp/NUM_PORTS)
-            else
-                # default to MS220-8P
-                NUM_PORTS=10
-            fi
-	    # not sure about PORT_POE_MW for non-POE models :shrug:
-	    # replace MTUN_IP with a link-local address to defang (not that we run mtunnel)
-	    gzip -dc /etc/switch.template.gz | sed  -e 's/__MTUN_IP__/169.254.0.1/g' -e "s/__MY_MAC_ADDRESS__/$(cat /tmp/MERAKI_MAC)/g" -e "s/__NUM_SWITCHPORTS__/$NUM_PORTS/g" -e 's/__PORT_POE_MW__/30000/g'  > /click/config
-        fi
+    printf '%s\n' "$(mac_to_internal_ipv4 "$mac")" > /tmp/MERAKI_IP
+    ipv6=$(mac_to_eui64_linklocal_shell "$mac")
+    printf '%s\n' "$ipv6" > /tmp/MERAKI_IP6
+    hostname=$(printf 'm%s' "$mac" | tr -d ':')
+    sysctl -qw "kernel.hostname=$hostname" 2>/dev/null || true
+    log "using MAC address $mac"
+
+    if ! mountpoint -q /click 2>/dev/null; then
+        mkdir -p /click
+        mount -t click none /click || { fail 'could not mount Click filesystem'; return 1; }
     fi
+    [ -r "$TEMPLATE" ] || { fail "switch graph template is missing: $TEMPLATE"; return 1; }
+    graph="$RUN_DIR/switch.graph.$$"
+    gzip -dc "$TEMPLATE" 2>/dev/null | sed \
+      -e 's/__MTUN_IP__/0.0.0.0/g' \
+      -e "s/__MY_MAC_ADDRESS__/$mac/g" \
+      -e "s/__NUM_SWITCHPORTS__/$LOGICAL_PORTS/g" \
+      -e 's/__PORT_POE_MW__/30000/g' > "$graph" || {
+        rm -f "$graph"; fail 'could not expand the Click graph'; return 1;
+    }
+    [ -s "$graph" ] || { rm -f "$graph"; fail 'expanded Click graph is empty'; return 1; }
+    graph_hash=$(sha256sum "$graph" | awk '{print $1}')
+    if ! cat "$graph" > /click/config; then
+        rm -f "$graph"; fail 'Click rejected the switch graph'; return 1;
+    fi
+    rm -f "$graph"
+    required_graph_contract || return 1
+    {
+      printf 'state=ready\nmodel=%s\nmodule_family=%s\nports=%s\nmac=%s\nipv6=%s\ngraph_sha256=%s\n' \
+        "$MODEL" "$MODULE_FAMILY" "$LOGICAL_PORTS" "$mac" "$ipv6" "$graph_hash"
+    } > "$STATUS.tmp.$$" && mv -f "$STATUS.tmp.$$" "$STATUS"
+    log "graph loaded for $MODEL"
 }
 
-stop() {
-    /bin/true
-}
-
-restart() {
-    stop
-    start
-}
-
-case "$1" in
-  start)
-      start
-    ;;
-  stop)
-      stop
-    ;;
-  restart|reload)
-      restart
-    ;;
-  *)
-    echo "Usage: $0 {start|stop|restart}"
-    exit 1
+case "${1:-}" in
+  start|restart|reload) start ;;
+  stop) : ;;
+  *) echo "Usage: $0 {start|stop|restart|reload}" >&2; exit 2 ;;
 esac
-
-exit $?

@@ -1,0 +1,31 @@
+#!/bin/sh
+# Generate an immutable, runtime-only exact board identity.
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+RUN_DIR=${POSTMERKOS_RUN_DIR:-/run/postmerkos}
+OUTPUT=${POSTMERKOS_BOARDINFO:-$RUN_DIR/boardinfo}
+BOARD_DATA=${POSTMERKOS_BOARD_DATA:-board_data}
+PROFILE=${POSTMERKOS_BOARD_PROFILE:-postmerkos-board-profile}
+sanitize() { printf '%s' "$1" | tr -cd 'A-Za-z0-9:._-'; }
+mkdir -p "$RUN_DIR"
+rm -f "$OUTPUT.tmp.$$"
+product=$($BOARD_DATA product_number 2>/dev/null || true)
+model=$($BOARD_DATA model_exact 2>/dev/null || true)
+if [ -z "$product" ] || [ -z "$model" ]; then
+  rm -f "$OUTPUT"
+  echo 'postmerkOS identity: exact board identity unavailable; model-specific hardware actions disabled' >&2
+  exit 1
+fi
+profile=$($PROFILE "$model" 2>/dev/null) || { rm -f "$OUTPUT"; echo "postmerkOS identity: unsupported exact model '$model'" >&2; exit 1; }
+serial=$(sanitize "$($BOARD_DATA serial 2>/dev/null || true)")
+mac=$(sanitize "$($BOARD_DATA mac 2>/dev/null || true)")
+{
+  printf '%s\n' "$profile"
+  printf 'PRODUCT_NUMBER=%s\n' "$(sanitize "$product")"
+  printf 'SERIAL=%s\n' "$serial"
+  printf 'MAC=%s\n' "$mac"
+  printf 'IDENTITY_SOURCE=board-config\nIDENTITY_EXACT=1\n'
+} > "$OUTPUT.tmp.$$"
+chmod 0444 "$OUTPUT.tmp.$$"
+mv -f "$OUTPUT.tmp.$$" "$OUTPUT"
+echo "postmerkOS identity: $model ($product)"

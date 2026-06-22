@@ -40,15 +40,25 @@ struct json_object *compatibility_report_json(void){
 }
 struct json_object *compatibility_notice_json(void){
   struct json_object *notice=json_object_new_object();
-  bool show=hardware.compatibility==COMPATIBILITY_UNTESTED&&!acknowledged();
+  bool incompatible=hardware.compatibility==COMPATIBILITY_INCOMPATIBLE;
+  bool show=incompatible || (hardware.compatibility==COMPATIBILITY_UNTESTED&&!acknowledged());
   json_object_object_add(notice,"required",json_object_new_boolean(show));
+  json_object_object_add(notice,"acknowledgeable",json_object_new_boolean(!incompatible));
   json_object_object_add(notice,"acknowledged",json_object_new_boolean(!show));
+  json_object_object_add(notice,"compatibility",json_object_new_string(hardware_compatibility_name(hardware.compatibility)));
   json_object_object_add(notice,"model",json_object_new_string(hardware.model));
   json_object_object_add(notice,"firmware",json_object_new_string(release_version()));
-  if(show)json_object_object_add(notice,"message",json_object_new_string("This model is currently untested. Please submit a compatibility report to the project issue tracker after checking ports, PoE, LEDs and management access."));
+  if(show)json_object_object_add(notice,"message",json_object_new_string(
+      incompatible
+        ? "This firmware is marked known-incompatible with the detected model. Do not flash or rely on switch hardware operation."
+        : "This model is currently untested. Please submit a compatibility report to the project issue tracker after checking ports, PoE, LEDs and management access."));
   return notice;
 }
 int compatibility_acknowledge(char *error,size_t error_size){
+  if(hardware.compatibility==COMPATIBILITY_INCOMPATIBLE){
+    set_error(error,error_size,"known-incompatible firmware cannot be acknowledged");
+    return -EPERM;
+  }
   mkdir("/config",0755);mkdir("/config/postmerkos",0700);
   struct json_object *ack=json_object_new_object();json_object_object_add(ack,"model",json_object_new_string(hardware.model));json_object_object_add(ack,"firmware",json_object_new_string(release_version()));
   int rc=json_object_to_file_ext(ACK_PATH,ack,JSON_C_TO_STRING_PRETTY);json_object_put(ack);

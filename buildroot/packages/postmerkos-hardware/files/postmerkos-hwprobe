@@ -1,0 +1,139 @@
+#!/bin/sh
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+RUNDIR=${POSTMERKOS_RUN_DIR:-/run/postmerkos}
+PROFILE_DIR=${POSTMERKOS_HARDWARE_PROFILE_DIR:-/usr/share/postmerkos/hardware-controls}
+BOARDINFO=${POSTMERKOS_BOARDINFO:-/run/postmerkos/boardinfo}
+CLICK_ROOT=${POSTMERKOS_CLICK_ROOT:-/click}
+SYS_ROOT=${POSTMERKOS_SYS_ROOT:-/sys}
+PROC_INPUT=${POSTMERKOS_PROC_INPUT:-/proc/bus/input/devices}
+DEV_INPUT=${POSTMERKOS_DEV_INPUT:-/dev/input}
+RUNTIME_JSON=$RUNDIR/hardware-controls.json
+RUNTIME_ENV=$RUNDIR/led-capabilities.env
+mkdir -p "$RUNDIR"
+model() { sed -n 's/^MODEL=//p' "$BOARDINFO" 2>/dev/null | sed -n '1p'; }
+bool() { [ "${1:-0}" = 1 ] && echo true || echo false; }
+json_string() { printf '%s' "${1:-}" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+load_profile() {
+    . "$PROFILE_DIR/default.conf"
+    local_model=$(model)
+    if [ -n "$local_model" ] && [ -r "$PROFILE_DIR/$local_model.conf" ]; then
+        . "$PROFILE_DIR/$local_model.conf"
+    fi
+}
+refresh() {
+    load_profile
+    local_model=$(model); local_model=${local_model:-unknown}
+    exact=0; [ "$local_model" != unknown ] && [ -r "$PROFILE_DIR/$local_model.conf" ] && exact=1
+    green_readable=0; green_writable=0; orange_readable=0; orange_writable=0
+    [ -n "${STATUS_LED_GREEN_PATH:-}" ] && [ -r "$STATUS_LED_GREEN_PATH" ] && green_readable=1
+    [ -n "${STATUS_LED_GREEN_PATH:-}" ] && [ -w "$STATUS_LED_GREEN_PATH" ] && green_writable=1
+    [ -n "${STATUS_LED_ORANGE_PATH:-}" ] && [ -r "$STATUS_LED_ORANGE_PATH" ] && orange_readable=1
+    [ -n "${STATUS_LED_ORANGE_PATH:-}" ] && [ -w "$STATUS_LED_ORANGE_PATH" ] && orange_writable=1
+    status_available=0
+    [ "$exact" = 1 ] && [ "${STATUS_LED_BACKEND:-}" = click-dual-state ] && \
+      [ "$green_writable" = 1 ] && [ "$orange_writable" = 1 ] && status_available=1
+    port_available=0
+    [ "$exact" = 1 ] && [ "${PORT_LED_BACKEND:-}" = click-poe-led-state ] && \
+      [ -w "${PORT_LED_HANDLER:-/nonexistent}" ] && port_available=1
+    panel_available=0
+    [ "$exact" = 1 ] && [ -r "${PANEL_LED_PATH:-/nonexistent}" ] && \
+      [ -w "${PANEL_LED_PATH:-/nonexistent}" ] && panel_available=1
+    reset_available=0
+    case "${RESET_BACKEND:-unidentified}" in
+      sysfs|click) [ -n "${RESET_PATH:-}" ] && [ -r "$RESET_PATH" ] && reset_available=1 ;;
+      evdev) [ -n "${RESET_DEVICE:-}" ] && [ -r "$RESET_DEVICE" ] && reset_available=1 ;;
+    esac
+    cat >"$RUNTIME_JSON" <<JSON
+{
+  "schema_version": 2,
+  "model": "$(json_string "$local_model")",
+  "profile_exact": $(bool "$exact"),
+  "profile_confidence": "$(json_string "${PROFILE_CONFIDENCE:-unknown}")",
+  "reset_button": {
+    "backend": "$(json_string "${RESET_BACKEND:-unidentified}")",
+    "path": "$(json_string "${RESET_PATH:-}")",
+    "device": "$(json_string "${RESET_DEVICE:-}")",
+    "code": ${RESET_CODE:-0}, "active": ${RESET_ACTIVE:-0},
+    "available": $(bool "$reset_available"),
+    "confidence": "$(json_string "${RESET_CONFIDENCE:-unknown}")",
+    "destructive_enabled": false
+  },
+  "leds": {
+    "status": {
+      "backend": "$(json_string "${STATUS_LED_BACKEND:-unidentified}")",
+      "available": $(bool "$status_available"),
+      "verified": $(bool "${STATUS_LED_VERIFIED:-0}"),
+      "confidence": "$(json_string "${STATUS_LED_CONFIDENCE:-unknown}")",
+      "normal_owner": "$(json_string "${STATUS_LED_NORMAL_OWNER:-vc_click}")",
+      "restore": "$(json_string "${STATUS_LED_RESTORE:-captured-pair}")",
+      "green": {"path":"$(json_string "${STATUS_LED_GREEN_PATH:-}")","protocol":"$(json_string "${STATUS_LED_PROTOCOL:-named-state}")","readable":$(bool "$green_readable"),"writable":$(bool "$green_writable")},
+      "orange": {"path":"$(json_string "${STATUS_LED_ORANGE_PATH:-}")","protocol":"$(json_string "${STATUS_LED_PROTOCOL:-named-state}")","readable":$(bool "$orange_readable"),"writable":$(bool "$orange_writable")}
+    },
+    "panel": {
+      "backend":"$(json_string "${PANEL_LED_BACKEND:-unidentified}")",
+      "path":"$(json_string "${PANEL_LED_PATH:-}")",
+      "available":$(bool "$panel_available"),
+      "confidence":"$(json_string "${PANEL_LED_CONFIDENCE:-unknown}")",
+      "automatic_use":false,
+      "known_tokens":{"normal":"$(json_string "${PANEL_LED_NORMAL_TOKEN:-link}")"}
+    },
+    "ports": {
+      "backend":"$(json_string "${PORT_LED_BACKEND:-unidentified}")",
+      "path":"$(json_string "${PORT_LED_HANDLER:-}")",
+      "available":$(bool "$port_available"),
+      "verified":$(bool "${PORT_LED_VERIFIED:-0}"),
+      "confidence":"$(json_string "${PORT_LED_CONFIDENCE:-unknown}")",
+      "protocol":"PORT %u, STATE %u"
+    }
+  }
+}
+JSON
+    cat >"$RUNTIME_ENV" <<ENV
+HARDWARE_CAPABILITY_SCHEMA='2'
+PORT_LED_BACKEND='${PORT_LED_BACKEND:-unidentified}'
+PORT_LED_HANDLER='${PORT_LED_HANDLER:-}'
+PORT_LED_AVAILABLE='$port_available'
+PORT_LED_VERIFIED='${PORT_LED_VERIFIED:-0}'
+STATUS_LED_BACKEND='${STATUS_LED_BACKEND:-unidentified}'
+STATUS_LED_GREEN_PATH='${STATUS_LED_GREEN_PATH:-}'
+STATUS_LED_ORANGE_PATH='${STATUS_LED_ORANGE_PATH:-}'
+STATUS_LED_PROTOCOL='${STATUS_LED_PROTOCOL:-named-state}'
+STATUS_LED_AVAILABLE='$status_available'
+STATUS_LED_VERIFIED='${STATUS_LED_VERIFIED:-0}'
+PANEL_LED_AUTOMATIC='0'
+RESET_DESTRUCTIVE_ENABLED='0'
+ENV
+    chmod 0444 "$RUNTIME_JSON" "$RUNTIME_ENV" 2>/dev/null || true
+}
+inventory_reset() {
+    echo 'Linux input devices:'; cat "$PROC_INPUT" 2>/dev/null || echo '  unavailable'
+    echo; echo 'Event nodes:'; ls -l "$DEV_INPUT"/event* 2>/dev/null || echo '  none'
+    echo; echo 'GPIO state:'
+    if [ -r "$SYS_ROOT/kernel/debug/gpio" ]; then cat "$SYS_ROOT/kernel/debug/gpio"; else find "$SYS_ROOT/class/gpio" -maxdepth 2 -name value -print 2>/dev/null || true; fi
+    echo; echo 'Click reset/button candidates:'
+    find "$CLICK_ROOT" -maxdepth 4 \( -iname '*reset*' -o -iname '*button*' -o -iname '*gpio*' \) -print 2>/dev/null || echo '  none'
+    echo 'Discovery is read-only; destructive reset is disabled.'
+}
+inventory_leds() {
+    echo 'LED class devices:'
+    for path in "$SYS_ROOT"/class/leds/*; do [ -e "$path" ] || continue; printf '  %s brightness=' "${path##*/}"; cat "$path/brightness" 2>/dev/null || echo '?'; done
+    echo; echo 'Click LED candidates:'; find "$CLICK_ROOT" -maxdepth 4 -iname '*led*' -print 2>/dev/null || echo '  none'
+    echo 'led_mode is discovery/manual-validation only and is never changed automatically.'
+}
+snapshot_paths() { for path in "$SYS_ROOT"/class/gpio/gpio*/value "$SYS_ROOT"/class/leds/*/brightness; do [ -r "$path" ] || continue; printf '%s=' "$path"; cat "$path" 2>/dev/null || true; done | sort; }
+watch_changes() {
+    seconds=${1:-30}; case "$seconds" in ''|*[!0-9]*) seconds=30 ;; esac
+    old=$RUNDIR/hwprobe-old.$$; new=$RUNDIR/hwprobe-new.$$
+    snapshot_paths >"$old"; echo "Watching readable GPIO/LED state for $seconds seconds (read-only)."
+    end=$(( $(date +%s 2>/dev/null || echo 0) + seconds ))
+    while [ "$(date +%s 2>/dev/null || echo 0)" -lt "$end" ]; do sleep 1; snapshot_paths >"$new"; if ! cmp -s "$old" "$new"; then diff -u "$old" "$new" 2>/dev/null || true; cp "$new" "$old"; fi; done
+    rm -f "$old" "$new"
+}
+case "${1:-all}" in
+  refresh) refresh ;;
+  reset-button) refresh; cat "$RUNTIME_JSON"; echo; inventory_reset; [ "${2:-}" = --watch ] && watch_changes "${3:-30}" ;;
+  leds) refresh; cat "$RUNTIME_JSON"; echo; inventory_leds; [ "${2:-}" = --watch ] && watch_changes "${3:-30}" ;;
+  all) refresh; cat "$RUNTIME_JSON"; echo; inventory_reset; echo; inventory_leds ;;
+  *) echo 'usage: postmerkos-hwprobe refresh|reset-button [--watch [SECONDS]]|leds [--watch [SECONDS]]|all' >&2; exit 2 ;;
+esac

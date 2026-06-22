@@ -1,270 +1,199 @@
 #!/bin/sh
-#
-# Copyright (C) Hal Martin (github.com/halmartin)
-#
-# Load kernel modules for managing the Vitesse ASIC
-#
+# Load the platform-selected Vitesse/Click module stack.
+set -u
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+BOARDINFO=${POSTMERKOS_BOARDINFO:-/run/postmerkos/boardinfo}
+CPUINFO=${POSTMERKOS_CPUINFO:-/proc/cpuinfo}
+NUM_PORTS_FILE=${POSTMERKOS_NUM_PORTS_FILE:-/tmp/NUM_PORTS}
+PROFILE_FILE=${POSTMERKOS_MODULE_PROFILE:-/run/postmerkos/module-profile}
+PROFILE_HELPER=${POSTMERKOS_BOARD_PROFILE:-/usr/sbin/postmerkos-board-profile}
+EMBEDDED_MODULE_ROOT=${POSTMERKOS_MODULE_ROOT:-/lib/modules}
+
+log() { echo "postmerkOS modules: $*"; }
+fail() { log "ERROR: $*" >&2; return 1; }
+
+read_model() {
+    model=
+    if [ -r "$BOARDINFO" ]; then
+        model=$(sed -n 's/^MODEL=//p' "$BOARDINFO" | sed -n '1p' | tr -cd 'A-Za-z0-9_-')
+    fi
+    if [ -z "$model" ] && command -v board_data >/dev/null 2>&1; then
+        model=$(board_data model 2>/dev/null || true)
+    fi
+    if [ -z "$model" ] && [ -r "$CPUINFO" ]; then
+        cpu=$(sed -n 's/^[[:space:]]*system type[[:space:]]*:[[:space:]]*//p' "$CPUINFO" | sed -n '1p')
+        case "$cpu" in
+            *VSC7425*) model=MS220-8 ;;
+            *VSC7427*) model=MS220-24 ;;
+            *"VSC7434 Dual"*) model=MS220-48 ;;
+            *VSC7434*) model=MS320-24 ;;
+        esac
+    fi
+    [ -n "$model" ] || return 1
+    printf '%s\n' "$model"
+}
 
 determine_board() {
-    # first, try to get the board info from /etc/boardinfo
-    if [ -f /etc/boardinfo ]; then
-        model=$(grep MODEL /etc/boardinfo | grep -Eo "MS[234]2(0-[248]([48])?)?(P)?")
-    # next, try to get the board info from the board-config partition on NAND
-    else
-        model=$(board_data model)
-        if [ ! -f /etc/boardinfo ]; then
-            # persist model in overlayfs
-            echo MODEL=${model} > /etc/boardinfo
-        fi
+    model=$(read_model) || { fail 'could not identify a supported platform'; return 1; }
+    profile=$($PROFILE_HELPER "$model" 2>/dev/null) || {
+        fail "unsupported or unidentified model '$model'"; return 1;
+    }
+    eval "$profile"
+    mkdir -p "$(dirname "$NUM_PORTS_FILE")" "$(dirname "$PROFILE_FILE")"
+    printf '%s\n' "$LOGICAL_PORTS" > "$NUM_PORTS_FILE.tmp.$$" || return 1
+    mv -f "$NUM_PORTS_FILE.tmp.$$" "$NUM_PORTS_FILE" || return 1
+    {
+        printf '%s\n' "$profile"
+        printf 'DETECTION_SOURCE=%s\n' "$([ -r "$BOARDINFO" ] && echo exact-runtime || echo family-fallback)"
+    } > "$PROFILE_FILE.tmp.$$" || return 1
+    chmod 0444 "$PROFILE_FILE.tmp.$$" 2>/dev/null || true
+    mv -f "$PROFILE_FILE.tmp.$$" "$PROFILE_FILE" || return 1
+    export model MODULE_FAMILY BOARD_DESCRIPTOR LOGICAL_PORTS COPPER_PORTS
+    log "detected $model; selecting $MODULE_FAMILY ($BOARD_DESCRIPTOR), $LOGICAL_PORTS logical ports"
+}
+
+selected_modules() {
+    printf '%s\n' \
+        "$MODULE_FAMILY/vtss_core.ko" \
+        proclikefs.ko \
+        merakiclick.ko \
+        elts_meraki.ko \
+        "$MODULE_FAMILY/vc_click.ko"
+}
+
+verify_hash_entry() {
+    root=$1 relative=$2 manifest="$1/postmerkos-modules.sha256"
+    [ -r "$manifest" ] || return 0
+    expected=$(awk -v f="$relative" '$2 == f || $2 == "./" f {print $1; exit}' "$manifest")
+    [ -n "$expected" ] || { fail "module hash entry is missing: $relative"; return 1; }
+    actual=$(sha256sum "$root/$relative" 2>/dev/null | awk '{print $1}')
+    [ "$actual" = "$expected" ] || { fail "module hash mismatch: $relative"; return 1; }
+}
+
+verify_vermagic() {
+    path=$1
+    running=$(uname -r)
+    vermagic=$(strings "$path" 2>/dev/null | sed -n 's/^vermagic=\([^ ]*\).*/\1/p' | sed -n '1p')
+    [ -n "$vermagic" ] || { fail "module has no vermagic: ${path##*/}"; return 1; }
+    [ "$vermagic" = "$running" ] || {
+        fail "module ${path##*/} targets $vermagic but the running kernel is $running"; return 1;
+    }
+}
+
+verify_selected_modules() {
+    root=$1
+    for relative in $(selected_modules); do
+        path="$root/$relative"
+        [ -f "$path" ] && [ ! -L "$path" ] && [ -s "$path" ] || {
+            fail "missing module $relative"; return 1;
+        }
+        verify_hash_entry "$root" "$relative" || return 1
+        verify_vermagic "$path" || return 1
+    done
+}
+
+loaded_now=
+load_one() {
+    module_name=$1 path=$2
+    shift 2
+    if grep -q "^${module_name} " /proc/modules 2>/dev/null; then
+        log "$module_name already loaded"
+        return 0
     fi
-
-    # model was not correctly determined?! use cpuinfo instead
-    if [ -z $model ]; then
-        model=$(cat /proc/cpuinfo | grep 'system type' | grep -Eo 'VSC74[23][457]( Dual)?')
+    if insmod "$path" "$@"; then
+        loaded_now="$module_name $loaded_now"
+        log "loaded ${path#$MOD_PATH/}"
+        return 0
     fi
+    fail "failed to load ${path#$MOD_PATH/}"
+}
 
-    # this will print a big error if we can't determine the model
-    # or if we fell back to using cpuinfo
-    if [ $(echo $model | grep -c -E "MS[234]2(0-[248]([48])?(P|LP|FP)?)?") -ne 1 ]; then
-        echo "!!! IMPORTANT !!!"
-        echo -n "Couldn't determine board model, THINGS WILL BE BROKEN. "
-        echo -n "model=${model} "
-        echo -n "please open an issue on github.com/halmartin/meraki-builder"
-        echo -n
-        echo -n "You can fix this by executing 'echo MS220-X > /etc/boardinfo && reboot'"
-        echo "where X is 8/8P/24/24P/48/48LP/48FP according to your switch model"
-        echo "!!! IMPORTANT !!!"
-        sleep 30
-    fi
-
-    # detect the mod_dir and switch_board from boardinfo
-    case "$model" in
-        MS220-8|MS220-8P|VSC7425)
-            mod_dir=luton26
-            switch_board=MERAKI_BOARD_MS220_8
-            echo 10 > /tmp/NUM_PORTS
-        ;;
-        MS220-24|MS220-24P|VSC7427)
-            mod_dir=luton26
-            switch_board=MERAKI_BOARD_MS220_24
-            echo 24 > /tmp/NUM_PORTS
-        ;;
-        MS220-48|MS220-48P)
-            mod_dir=jaguar_dual
-            switch_board=MERAKI_BOARD_MS220_48
-            echo 52 > /tmp/NUM_PORTS
-        ;;
-        MS320-24|MS320-24P|VSC7434)
-            mod_dir=jaguar
-            switch_board=MERAKI_BOARD_MS320_24
-            echo 28 > /tmp/NUM_PORTS
-        ;;
-        MS320-48|MS320-48P|"VSC7434 Dual")
-            mod_dir=jaguar_dual
-            switch_board=MERAKI_BOARD_MS320_48
-            echo 52 > /tmp/NUM_PORTS
-        ;;
-        MS22|MS22P)
-            mod_dir=luton26
-            switch_board=MERAKI_BOARD_MS22
-            echo 24 > /tmp/NUM_PORTS
-        ;;
-        MS42|MS42P)
-            mod_dir=jaguar_dual
-            switch_board=MERAKI_BOARD_MS42
-            echo 52 > /tmp/NUM_PORTS
-        ;;
-    esac
-
-    export model
-    export mod_dir
-    export switch_board
+unwind_new_modules() {
+    for module_name in $loaded_now; do
+        rmmod "$module_name" 2>/dev/null || true
+    done
 }
 
 load_modules() {
-    # we have to load vtss_core first
-    insmod ${MOD_PATH}/${mod_dir}/vtss_core.ko board_desc=${switch_board}
-    if [ $? -ne 0 ]; then
-        echo "Error inserting '${mod_dir}/vtss_core.ko board_desc=${switch_board}'" > /dev/kmsg
-    else
-        echo "Loaded '${mod_dir}/vtss_core.ko board_desc=${switch_board}'"
-    fi
-    # load the other modules
-    modules="proclikefs merakiclick elts_meraki"
-    for mod in $modules; do
-        insmod ${MOD_PATH}/${mod}.ko
-        if [ $? -ne 0 ]; then
-            echo "Error inserting ${mod}.ko" > /dev/kmsg
-        else
-            echo "Loaded '${mod}.ko'"
-        fi
-        sleep 1
-    done
-    # vc_click is loaded last
-    insmod ${MOD_PATH}/${mod_dir}/vc_click.ko
-    if [ $? -ne 0 ]; then
-        echo "Error inserting '${mod_dir}/vc_click.ko'" > /dev/kmsg
-    else
-        echo "Loaded '${mod_dir}/vc_click.ko'"
-    fi
+    verify_selected_modules "$MOD_PATH" || return 1
+    load_one vtss_core "$MOD_PATH/$MODULE_FAMILY/vtss_core.ko" "board_desc=$BOARD_DESCRIPTOR" || { unwind_new_modules; return 1; }
+    load_one proclikefs "$MOD_PATH/proclikefs.ko" || { unwind_new_modules; return 1; }
+    load_one merakiclick "$MOD_PATH/merakiclick.ko" || { unwind_new_modules; return 1; }
+    load_one elts_meraki "$MOD_PATH/elts_meraki.ko" || { unwind_new_modules; return 1; }
+    load_one vc_click "$MOD_PATH/$MODULE_FAMILY/vc_click.ko" || { unwind_new_modules; return 1; }
+    return 0
 }
 
-# copying with bs=1 is slow, calculate the maximum blocksize we can use with dd
 largest_blocksize() {
-    header_offset=$1
-    max_size=1
-    for size in $(seq 2 6); do
-        if [ $(($header_offset % $((2**$size)))) -eq 0 ]; then
-          max_size=$((2**$size))
-        else
-          break
-        fi
+    offset=$1 block=1 power=2
+    while [ "$power" -le 64 ]; do
+        [ $((offset % power)) -eq 0 ] || break
+        block=$power; power=$((power * 2))
     done
-    echo $max_size
+    echo "$block"
 }
 
-check_and_load() {
-    KVER=$(uname -r | awk -F'-' '{print $1}')
-    # check the module version
-    RD_KVER=$(strings /tmp/lib/modules/${mod_dir}/vtss_core.ko | grep 'vermagic=' | awk -F'=' '{print $2}' | awk -F'-' '{print $1}')
-    if [ "$RD_KVER" != "$KVER" ]; then
-        echo "$part contains modules for $RD_KVER, but we booted $KVER"
-        # clean up modules
-        rm -rf /tmp/lib/modules
-    else
-        echo "Found kernel modules in $part"
-        export MOD_PATH=/tmp/lib/modules
-        load_modules
-        # we loaded the modules, bail
-        return
-    fi
-}
-
-dump_modules() {
-    MTD_PART=$(grep ${part} /proc/mtd | awk -F':' '{print $1}' | grep -o '[[:digit:]]*')
-    MTD_SIZE=$(grep ${part} /proc/mtd | awk '{print $2}')
-    if [ $(df /tmp | tail -1 | awk '{print $4}') -lt $MTD_SIZE ]; then
-        # we don't have space in /tmp to dump the ${part}
-        echo "Insufficient space in /tmp, using slower dumping method"
-        RD_OFFSET=$(find_hdr -g /dev/mtdblock${MTD_PART})
-        BLOCK_SIZE=$(largest_blocksize $RD_OFFSET)
-        cd /tmp
-        dd if=/dev/mtdblock${MTD_PART} bs=$BLOCK_SIZE skip=$(($RD_OFFSET/$BLOCK_SIZE)) | gzip -dc | cpio -idu lib/modules/*.ko lib/modules/${mod_dir}
-        RD_KVER=$(strings /tmp/lib/modules/${mod_dir}/vtss_core.ko | grep 'vermagic=' | awk -F'=' '{print $2}' | awk -F'-' '{print $1}')
-   fi
-   dd if=/dev/mtdblock${MTD_PART} of=/tmp/${part}.bin bs=1M
-   RD_OFFSET=$(find_hdr -g /tmp/${part}.bin)
-   # no header, skip
-   if [ $RD_OFFSET -lt 0 ]; then
-       rm /tmp/${part}.bin
-   else
-       BLOCK_SIZE=$(largest_blocksize $RD_OFFSET)
-       # found GZIP header, it's at RD_OFFSET
-       dd if=/tmp/${part}.bin of=/tmp/initrd-${part}.gz bs=$BLOCK_SIZE skip=$(($RD_OFFSET/$BLOCK_SIZE))
-       rm /tmp/${part}.bin
-       # extract the kernel modules from initrd.gz
-       cd /tmp && gzip -dc /tmp/initrd-${part}.gz | cpio -idu lib/modules/*.ko lib/modules/${mod_dir}
-       rm /tmp/initrd-${part}.gz
-   fi
-}
-
-fwcutter() {
-    # check that the kernel modules exist
-    if [ ! -d /lib/modules/${mod_dir} ]; then
-        # deploy fwcutter!
-        command -v find_hdr
-        if [ $? -eq 0 ]; then
-            # store current kernel version
-            KVER=$(uname -r | awk -F'-' '{print $1}')
-            export KVER
-            # find the mtd partition
-            fw_regions="part1 part2"
-            for part in $fw_regions; do
-                MTD_PART=$(grep ${part} /proc/mtd | awk -F':' '{print $1}' | grep -o '[[:digit:]]*')
-                MTD_SIZE=$(grep ${part} /proc/mtd | awk '{print $2}')
-                if [ $(df /tmp | tail -1 | awk '{print $4}') -lt $MTD_SIZE ]; then
-                    # we don't have space in /tmp to dump the ${part}
-                    echo "Insufficient space in /tmp, using slower dumping method"
-                    RD_OFFSET=$(find_hdr -g /dev/mtdblock${MTD_PART})
-                    BLOCK_SIZE=$(largest_blocksize $RD_OFFSET)
-                    cd /tmp
-                    dd if=/dev/mtdblock${MTD_PART} bs=$BLOCK_SIZE skip=$(($RD_OFFSET/$BLOCK_SIZE)) | gzip -dc | cpio -idu lib/modules/*.ko lib/modules/${mod_dir}
-                    RD_KVER=$(strings /tmp/lib/modules/${mod_dir}/vtss_core.ko | grep 'vermagic=' | awk -F'=' '{print $2}' | awk -F'-' '{print $1}')
-                fi
-                dd if=/dev/mtdblock${MTD_PART} of=/tmp/${part}.bin bs=1M
-                RD_OFFSET=$(find_hdr -g /tmp/${part}.bin)
-                # no header, skip
-                if [ $RD_OFFSET -lt 0 ]; then
-                    rm /tmp/${part}.bin
-                else
-                    BLOCK_SIZE=$(largest_blocksize $RD_OFFSET)
-                    # found GZIP header, it's at RD_OFFSET
-                    dd if=/tmp/${part}.bin of=/tmp/initrd-${part}.gz bs=$BLOCK_SIZE skip=$(($RD_OFFSET/$BLOCK_SIZE))
-                    rm /tmp/${part}.bin
-                    # extract the kernel modules from initrd.gz
-                    cd /tmp && gzip -dc /tmp/initrd-${part}.gz | cpio -idu lib/modules/*.ko lib/modules/${mod_dir}
-                    rm /tmp/initrd-${part}.gz
-                    # check the module version
-                    RD_KVER=$(strings /tmp/lib/modules/${mod_dir}/vtss_core.ko | grep 'vermagic=' | awk -F'=' '{print $2}' | awk -F'-' '{print $1}')
-                    if [ "$RD_KVER" != "$KVER" ]; then
-                        echo "$part contains modules for $RD_KVER, but we booted $KVER"
-                        # clean up modules
-                        rm -rf /tmp/lib/modules
-                    else
-                        echo "Found kernel modules in $part"
-                        export MOD_PATH=/tmp/lib/modules
-                        load_modules
-                        # we loaded the modules, bail
-                        return
-                    fi
-                fi
-            done
-            echo "Couldn't find kernel modules for $KVER"
-        else
-            echo "Kernel modules are missing and find_hdr is not present!"
+recover_modules() {
+    command -v find_hdr >/dev/null 2>&1 || { fail 'embedded modules are incomplete and find_hdr is unavailable'; return 1; }
+    stage=/tmp/postmerkos-module-recovery.$$
+    rm -rf "$stage"; mkdir -p "$stage" || return 1
+    for part in part1 part2; do
+        number=$(awk -F: -v n="\"$part\"" '$4 == n {gsub(/^mtd/,"",$1); print $1; exit}' /proc/mtd 2>/dev/null)
+        [ -n "$number" ] || continue
+        device=/dev/mtdblock$number
+        offset=$(find_hdr -g "$device" 2>/dev/null || echo -1)
+        case "$offset" in -1|''|*[!0-9]*) continue ;; esac
+        block=$(largest_blocksize "$offset")
+        log "recovering $MODULE_FAMILY modules from $part"
+        (
+            cd "$stage" || exit 1
+            dd if="$device" bs="$block" skip=$((offset / block)) 2>/dev/null |
+                gzip -dc 2>/dev/null |
+                cpio -idmu 'lib/modules/*.ko' "lib/modules/$MODULE_FAMILY/*.ko" 2>/dev/null
+        ) || true
+        if [ -d "$stage/lib/modules" ]; then
+            MOD_PATH=$stage/lib/modules
+            if verify_selected_modules "$MOD_PATH"; then
+                load_modules
+                rc=$?
+                rm -rf "$stage"
+                return "$rc"
+            fi
         fi
-    else
-        # the modules exist in squashfs
-        export MOD_PATH=/lib/modules
-        load_modules
-    fi
+        rm -rf "$stage"; mkdir -p "$stage"
+    done
+    rm -rf "$stage"
+    fail "could not recover compatible $MODULE_FAMILY modules"
 }
 
 start() {
-    # figure out the switch board
-    determine_board
-    fwcutter
+    determine_board || return 1
+    if grep -q '^vc_click ' /proc/modules 2>/dev/null; then
+        log 'switch module stack is already active'
+        return 0
+    fi
+    MOD_PATH=$EMBEDDED_MODULE_ROOT
+    if verify_selected_modules "$MOD_PATH"; then
+        load_modules
+    else
+        recover_modules
+    fi
 }
 
 stop() {
-    modules="vc_click elts_meraki merakiclick proclikefs vtss_core"
-    for mod in $modules; do
-        modprobe -r -f $mod
-        if [ $? -ne 0 ]; then
-            echo "Error removing '${mod}.ko'" > /dev/kmsg
-            return
-        fi
-    done
+    # The Vitesse stack owns the live ASIC. Forced unload is unsafe and normal
+    # service shutdown is immediately followed by reboot/poweroff.
+    log 'retaining active switch module stack until reboot'
+    return 0
 }
 
-restart() {
-    stop
-    start
-}
-
-case "$1" in
-  start)
-      start
+case "${1:-}" in
+  start) start ;;
+  stop) stop ;;
+  restart|reload) start ;;
+  profile)
+    determine_board || exit 1
+    cat "$PROFILE_FILE"
     ;;
-  stop)
-      stop
-    ;;
-  restart|reload)
-      restart
-    ;;
-  *)
-    echo "Usage: $0 {start|stop|restart}"
-    exit 1
+  *) echo "Usage: $0 {start|stop|restart|reload|profile}" >&2; exit 2 ;;
 esac
-
-exit $?

@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#define DEVICE_FILE "/etc/boardinfo"
+#define DEVICE_FILE "/run/postmerkos/boardinfo"
 #define PORTS_FILE "/click/switch_port_table/dump_pports"
 
 /* Returns the current UTC time as an ISO-8601 string. */

@@ -18,6 +18,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#define CLIENTS_FILE "/click/client_ip_table/list"
+
 static void add_error(struct json_object *errors, const char *source,
                       const char *message) {
   struct json_object *error = json_object_new_object();
@@ -137,6 +139,50 @@ static void add_port_status(struct json_object *root,
   fclose(file);
 }
 
+/* Report clients learned by Click's client_ip_table, grouped by switch port.
+ * Each row of the "list" handler is whitespace-delimited with a header line;
+ * field 3 = port, field 6 = mac, field 7 = seen_ip, field 9 = sniff_ago. */
+static void add_clients(struct json_object *root, struct json_object *errors) {
+  struct json_object *clients = json_object_new_object();
+  json_object_object_add(root, "clients", clients);
+
+  const char *clients_path = getenv("CONFIGD_CLIENTS_FILE");
+  if (!clients_path || !*clients_path) clients_path = CLIENTS_FILE;
+  FILE *file = fopen(clients_path, "r");
+  if (!file) return;
+
+  char line[512];
+  bool header = true;
+  while (fgets(line, sizeof(line), file)) {
+    if (header) { header = false; continue; }
+
+    char port_str[16] = "";
+    char mac[32] = "";
+    char ip[64] = "";
+    char age_str[32] = "";
+
+    if (get_field_copy(line, 3, port_str, sizeof(port_str)) != 0 ||
+        get_field_copy(line, 6, mac, sizeof(mac)) != 0 ||
+        get_field_copy(line, 7, ip, sizeof(ip)) != 0)
+      continue;
+
+    get_field_copy(line, 9, age_str, sizeof(age_str));
+
+    struct json_object *port_array;
+    if (!json_object_object_get_ex(clients, port_str, &port_array)) {
+      port_array = json_object_new_array();
+      json_object_object_add(clients, port_str, port_array);
+    }
+
+    struct json_object *entry = json_object_new_object();
+    json_object_object_add(entry, "mac", json_object_new_string(mac));
+    json_object_object_add(entry, "ip", json_object_new_string(ip));
+    json_object_object_add(entry, "age", json_object_new_double(atof(age_str)));
+    json_object_array_add(port_array, entry);
+  }
+  fclose(file);
+}
+
 struct json_object *get_status(void) {
   struct json_object *root = json_object_new_object();
   struct json_object *errors = json_object_new_array();
@@ -156,8 +202,35 @@ struct json_object *get_status(void) {
   json_object_object_add(security, "default_password_active",
                          json_object_new_boolean(access(default_marker, F_OK) == 0));
   json_object_object_add(root, "security", security);
+  struct json_object *hardware_policy = json_object_new_object();
+  struct json_object *button_status = json_object_from_file(
+      "/run/postmerkos/button-status.json");
+  if (button_status && json_object_is_type(button_status, json_type_object)) {
+    json_object_object_add(hardware_policy, "reset_button", button_status);
+    struct json_object *state = NULL;
+    if (json_object_object_get_ex(button_status, "state", &state) &&
+        json_object_is_type(state, json_type_string) &&
+        (!strcmp(json_object_get_string(state), "unidentified") ||
+         !strcmp(json_object_get_string(state), "unavailable")))
+      add_error(errors, "reset-button",
+                "physical reset-button input has not been mapped; run postmerkos-hwprobe reset-button --watch");
+  } else if (button_status) {
+    json_object_put(button_status);
+  }
+  FILE *led_owner = fopen("/run/postmerkos/led-owner", "r");
+  if (led_owner) {
+    char owner[64] = {0};
+    if (fgets(owner, sizeof(owner), led_owner)) {
+      owner[strcspn(owner, "\r\n")] = '\0';
+      json_object_object_add(hardware_policy, "led_owner",
+                             json_object_new_string(owner));
+    }
+    fclose(led_owner);
+  }
+  json_object_object_add(root, "hardware_policy", hardware_policy);
   add_temperatures(root, errors);
   add_port_status(root, errors);
+  add_clients(root, errors);
 
   const char *config_error = config_file_runtime_error();
   if (config_error) add_error(errors, "configuration", config_error);

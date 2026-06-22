@@ -213,7 +213,8 @@ static int calculate_sha256(const char *path, char output[65],
   return 0;
 }
 
-static int run_fw_update(const char *path, const char *overlay, bool force,
+static int run_fw_update(const char *path, const char *artifact_name,
+                         const char *manifest_path, const char *overlay, bool force,
                          bool accept_untested, bool verify_only, bool detached,
                          char *error, size_t error_size) {
   struct stat st;
@@ -248,10 +249,16 @@ static int run_fw_update(const char *path, const char *overlay, bool force,
     }
     int nullfd = open("/dev/null", O_RDONLY);
     if (nullfd >= 0) { dup2(nullfd, STDIN_FILENO); if (nullfd > STDERR_FILENO) close(nullfd); }
-    char *args[18]; int n = 0;
+    char *args[24]; int n = 0;
     args[n++] = "fw_update"; args[n++] = "--sha256"; args[n++] = sha256;
     args[n++] = "--overlay"; args[n++] = (char *)overlay;
     args[n++] = "--source"; args[n++] = "web-upload"; args[n++] = "--yes";
+    if (artifact_name && *artifact_name) {
+      args[n++] = "--artifact-name"; args[n++] = (char *)artifact_name;
+    }
+    if (manifest_path && *manifest_path) {
+      args[n++] = "--manifest"; args[n++] = (char *)manifest_path;
+    }
     if (verify_only) args[n++] = "--verify-only";
     if (force) args[n++] = "--force";
     if (accept_untested) args[n++] = "--accept-untested";
@@ -273,16 +280,20 @@ static int run_fw_update(const char *path, const char *overlay, bool force,
   return 0;
 }
 
-int firmware_validate_update(const char *path, const char *overlay, bool force,
-                             bool accept_untested, char *error, size_t error_size) {
-  return run_fw_update(path, overlay, force, accept_untested, true, false,
-                       error, error_size);
+int firmware_validate_update(const char *path, const char *artifact_name,
+                             const char *manifest_path, const char *overlay,
+                             bool force, bool accept_untested,
+                             char *error, size_t error_size) {
+  return run_fw_update(path, artifact_name, manifest_path, overlay, force,
+                       accept_untested, true, false, error, error_size);
 }
 
-int firmware_start_update(const char *path, const char *overlay, bool force,
-                          bool accept_untested, char *error, size_t error_size) {
-  return run_fw_update(path, overlay, force, accept_untested, false, true,
-                       error, error_size);
+int firmware_start_update(const char *path, const char *artifact_name,
+                          const char *manifest_path, const char *overlay,
+                          bool force, bool accept_untested,
+                          char *error, size_t error_size) {
+  return run_fw_update(path, artifact_name, manifest_path, overlay, force,
+                       accept_untested, false, true, error, error_size);
 }
 
 struct json_object *firmware_repositories_json(void) {

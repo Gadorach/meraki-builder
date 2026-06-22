@@ -118,6 +118,10 @@ int network_parse_cidr(const char *cidr, struct ipv4_runtime *value,
   uint32_t mask = prefix == 0 ? 0 : 0xffffffffU << (32 - prefix);
   uint32_t network = host & mask;
   uint32_t broadcast = network | ~mask;
+  if (prefix <= 30 && (host == network || host == broadcast)) {
+    set_error(error, error_size, "IPv4 address cannot be the network or broadcast address");
+    return -EINVAL;
+  }
   address_to_string(broadcast, value->broadcast, sizeof(value->broadcast));
   return 0;
 }
@@ -127,12 +131,7 @@ static int derive_fallback(const char *cidr, unsigned int mtu,
                            char *error, size_t error_size) {
   int rc = network_parse_cidr(cidr, value, error, error_size);
   if (rc != 0) return rc;
-  struct in_addr address;
-  if (parse_ipv4(value->address, &address) != 0) return -EINVAL;
-  uint32_t host = ntohl(address.s_addr);
-  uint32_t mask = value->prefix == 0 ? 0 : 0xffffffffU << (32 - value->prefix);
-  address_to_string((host & mask) + 1U, value->gateway,
-                    sizeof(value->gateway));
+  snprintf(value->gateway, sizeof(value->gateway), "0.0.0.0");
   value->mtu = mtu;
   return 0;
 }
@@ -205,25 +204,28 @@ int network_validate_config(struct json_object *config,
                            error, error_size) != 0) return -EINVAL;
 
     struct json_object *gateway_obj = NULL;
-    if (!json_object_object_get_ex(ipv4, "gateway", &gateway_obj) ||
-        !json_object_is_type(gateway_obj, json_type_string)) {
-      set_error(error, error_size,
-                "network.ipv4.gateway is required in static mode");
-      return -EINVAL;
-    }
-    struct in_addr gateway;
-    if (parse_ipv4(json_object_get_string(gateway_obj), &gateway) != 0) {
-      set_error(error, error_size, "network.ipv4.gateway is invalid");
-      return -EINVAL;
-    }
-    struct in_addr address;
-    parse_ipv4(parsed.address, &address);
-    uint32_t mask = parsed.prefix == 0 ? 0 :
-                    0xffffffffU << (32 - parsed.prefix);
-    if ((ntohl(address.s_addr) & mask) != (ntohl(gateway.s_addr) & mask)) {
-      set_error(error, error_size,
-                "network.ipv4.gateway must be in the configured subnet");
-      return -EINVAL;
+    if (json_object_object_get_ex(ipv4, "gateway", &gateway_obj)) {
+      if (!json_object_is_type(gateway_obj, json_type_string)) {
+        set_error(error, error_size, "network.ipv4.gateway must be a string");
+        return -EINVAL;
+      }
+      const char *gateway_text = json_object_get_string(gateway_obj);
+      if (gateway_text && *gateway_text && strcmp(gateway_text, "0.0.0.0")) {
+        struct in_addr gateway;
+        if (parse_ipv4(gateway_text, &gateway) != 0) {
+          set_error(error, error_size, "network.ipv4.gateway is invalid");
+          return -EINVAL;
+        }
+        struct in_addr address;
+        parse_ipv4(parsed.address, &address);
+        uint32_t mask = parsed.prefix == 0 ? 0 :
+                        0xffffffffU << (32 - parsed.prefix);
+        if ((ntohl(address.s_addr) & mask) != (ntohl(gateway.s_addr) & mask)) {
+          set_error(error, error_size,
+                    "network.ipv4.gateway must be in the configured subnet");
+          return -EINVAL;
+        }
+      }
     }
   } else {
     if (!json_object_object_get_ex(ipv4, "fallback_address", &address_obj) ||
@@ -462,8 +464,9 @@ static int apply_ipv4(const struct ipv4_runtime *value, const char *source,
   snprintf(command, sizeof(command), "%s %u %s %u %s 1",
            value->address, value->prefix, value->gateway,
            value->mtu, value->broadcast);
-  printf("%s network source=%s set_host_ip=%s%s\n", get_time(), source,
-         command, dry_run ? " dry_run=true" : "");
+  if (!getenv("POSTMERKOS_BOOT_OUTPUT"))
+    printf("%s network source=%s set_host_ip=%s%s\n", get_time(), source,
+           command, dry_run ? " dry_run=true" : "");
 
   int rc = dry_run ? 0 : click_write("/click/set_host_ip/run", command);
   if (rc != 0) {

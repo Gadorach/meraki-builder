@@ -5,7 +5,7 @@
 ## Detection inputs
 
 - `CONFIGD_MODEL` test override.
-- `/etc/boardinfo` (`CONFIGD_BOARDINFO` override).
+- `/run/postmerkos/boardinfo` (`CONFIGD_BOARDINFO` override).
 - `/tmp/NUM_PORTS` (`CONFIGD_NUM_PORTS` override).
 - PD690xx I2C presence; skipped in tests with `CONFIGD_SKIP_I2C=1`.
 

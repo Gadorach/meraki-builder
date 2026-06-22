@@ -4,7 +4,7 @@
 #
 ################################################################################
 
-POSTMERKOS_CONSOLE_VERSION = 1.0
+POSTMERKOS_CONSOLE_VERSION = 1.1
 POSTMERKOS_CONSOLE_SITE = package/postmerkos-console
 POSTMERKOS_CONSOLE_SITE_METHOD = local
 POSTMERKOS_CONSOLE_INSTALL_TARGET = YES

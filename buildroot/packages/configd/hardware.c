@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "release.h"
 
 struct hardware_record {
   const char *model;
@@ -19,22 +20,22 @@ struct hardware_record {
 static const struct hardware_record records[] = {
   {"MS220-8", "vcore3-luton", 10, 8, 2, 0, 1, COMPATIBILITY_UNTESTED},
   {"MS220-8P", "vcore3-luton", 10, 8, 2, 8, 1, COMPATIBILITY_UNTESTED},
-  {"MS220-24", "vcore3-luton", 24, 24, 0, 0, 1, COMPATIBILITY_UNTESTED},
-  {"MS220-24P", "vcore3-luton", 24, 24, 0, 24, 1, COMPATIBILITY_UNTESTED},
-  {"MS220-48", "vcore3-jaguar", 52, 48, 4, 0, 1, COMPATIBILITY_UNTESTED},
-  {"MS220-48LP", "vcore3-jaguar", 52, 48, 4, 48, 1, COMPATIBILITY_UNTESTED},
-  {"MS220-48FP", "vcore3-jaguar", 52, 48, 4, 48, 1, COMPATIBILITY_UNTESTED},
-  {"MS220-48P", "vcore3-jaguar", 52, 48, 4, 48, 1, COMPATIBILITY_UNTESTED},
-  {"MS22", "vcore3-luton", 24, 24, 0, 0, 1, COMPATIBILITY_UNTESTED},
-  {"MS22P", "vcore3-luton", 24, 24, 0, 24, 1, COMPATIBILITY_UNTESTED},
+  {"MS220-24", "vcore3-luton", 26, 24, 2, 0, 1, COMPATIBILITY_UNTESTED},
+  {"MS220-24P", "vcore3-luton", 26, 24, 2, 24, 1, COMPATIBILITY_UNTESTED},
+  {"MS220-48", "vcore3-jaguar-dual", 52, 48, 4, 0, 2, COMPATIBILITY_UNTESTED},
+  {"MS220-48LP", "vcore3-jaguar-dual", 52, 48, 4, 48, 2, COMPATIBILITY_UNTESTED},
+  {"MS220-48FP", "vcore3-jaguar-dual", 52, 48, 4, 48, 2, COMPATIBILITY_UNTESTED},
+  {"MS220-48P", "vcore3-jaguar-dual", 52, 48, 4, 48, 2, COMPATIBILITY_UNTESTED},
+  {"MS22", "vcore3-luton", 26, 24, 2, 0, 1, COMPATIBILITY_UNTESTED},
+  {"MS22P", "vcore3-luton", 26, 24, 2, 24, 1, COMPATIBILITY_UNTESTED},
   {"MS42", "vcore3-jaguar-dual", 52, 48, 4, 0, 2, COMPATIBILITY_UNTESTED},
-  {"MS42P", "vcore3-jaguar-dual", 52, 48, 4, 48, 2, COMPATIBILITY_CONFIRMED},
+  {"MS42P", "vcore3-jaguar-dual", 52, 48, 4, 48, 2, COMPATIBILITY_UNTESTED},
   {"MS320-24", "vcore3-jaguar", 28, 24, 4, 0, 1, COMPATIBILITY_UNTESTED},
-  {"MS320-24P", "vcore3-jaguar", 28, 24, 4, 24, 1, COMPATIBILITY_CONFIRMED},
-  {"MS320-48", "vcore3-jaguar", 52, 48, 4, 0, 1, COMPATIBILITY_UNTESTED},
-  {"MS320-48LP", "vcore3-jaguar", 52, 48, 4, 48, 1, COMPATIBILITY_UNTESTED},
-  {"MS320-48FP", "vcore3-jaguar", 52, 48, 4, 48, 1, COMPATIBILITY_UNTESTED},
-  {"MS320-48P", "vcore3-jaguar", 52, 48, 4, 48, 1, COMPATIBILITY_UNTESTED},
+  {"MS320-24P", "vcore3-jaguar", 28, 24, 4, 24, 1, COMPATIBILITY_UNTESTED},
+  {"MS320-48", "vcore3-jaguar-dual", 52, 48, 4, 0, 2, COMPATIBILITY_UNTESTED},
+  {"MS320-48LP", "vcore3-jaguar-dual", 52, 48, 4, 48, 2, COMPATIBILITY_UNTESTED},
+  {"MS320-48FP", "vcore3-jaguar-dual", 52, 48, 4, 48, 2, COMPATIBILITY_UNTESTED},
+  {"MS320-48P", "vcore3-jaguar-dual", 52, 48, 4, 48, 2, COMPATIBILITY_UNTESTED},
 };
 
 static const char *env_or_default(const char *name, const char *fallback) {
@@ -51,10 +52,18 @@ static void trim(char *value) {
     value[--len] = '\0';
 }
 
+static void copy_model(char *model, size_t size, const char *value) {
+  if (!model || !size) return;
+  size_t length = value ? strlen(value) : 0;
+  if (length >= size) length = size - 1;
+  if (length) memcpy(model, value, length);
+  model[length] = '\0';
+}
+
 static int read_model(char *model, size_t size) {
   const char *override = getenv("CONFIGD_MODEL");
-  if (override && *override) { snprintf(model, size, "%s", override); return 0; }
-  const char *path = env_or_default("CONFIGD_BOARDINFO", "/etc/boardinfo");
+  if (override && *override) { copy_model(model, size, override); return 0; }
+  const char *path = env_or_default("CONFIGD_BOARDINFO", "/run/postmerkos/boardinfo");
   FILE *file = fopen(path, "r");
   if (!file) return -errno;
   char line[128];
@@ -62,7 +71,7 @@ static int read_model(char *model, size_t size) {
     trim(line);
     const char *value = !strncmp(line, "MODEL=", 6) ? line + 6 : line;
     if (!strncmp(value, "MS", 2)) {
-      snprintf(model, size, "%s", value);
+      copy_model(model, size, value);
       fclose(file);
       return 0;
     }
@@ -115,11 +124,23 @@ int hardware_init(struct hardware_info *info, struct pd690xx_cfg *pd690xx) {
     info->switch_instances = 1;
   }
   unsigned int detected_ports = read_port_count();
-  if (detected_ports) {
+  if (!record && detected_ports) {
     info->port_count = detected_ports;
-    if (!info->copper_port_count) info->copper_port_count = detected_ports;
-    if (info->copper_port_count > detected_ports) info->copper_port_count = detected_ports;
-    info->uplink_port_count = detected_ports - info->copper_port_count;
+    info->copper_port_count = detected_ports;
+    info->uplink_port_count = 0;
+  } else if (record && detected_ports && detected_ports != record->ports) {
+    fprintf(stderr, "hardware: ignoring stale port count %u for %s (expected %u)\n",
+            detected_ports, info->model, record->ports);
+  }
+  const char *release_state = release_model_compatibility(info->model);
+  if (release_state) {
+    if (!strcmp(release_state, "known-incompatible"))
+      info->compatibility = COMPATIBILITY_INCOMPATIBLE;
+    else if (!strcmp(release_state, "validated") ||
+             !strcmp(release_state, "confirmed"))
+      info->compatibility = COMPATIBILITY_CONFIRMED;
+    else
+      info->compatibility = COMPATIBILITY_UNTESTED;
   }
   info->poe_supported = info->poe_port_count > 0;
   const char *skip_i2c = getenv("CONFIGD_SKIP_I2C");
@@ -161,5 +182,13 @@ struct json_object *hardware_capabilities_json(const struct hardware_info *info)
   json_object_array_add(policies, json_object_new_string("boot-prune"));
   json_object_object_add(poe, "policies", policies);
   json_object_object_add(caps, "poe", poe);
+  const char *controls_path = getenv("POSTMERKOS_HARDWARE_CONTROLS");
+  if (!controls_path || !*controls_path)
+    controls_path = "/run/postmerkos/hardware-controls.json";
+  struct json_object *controls = json_object_from_file(controls_path);
+  if (controls && json_object_is_type(controls, json_type_object))
+    json_object_object_add(caps, "controls", controls);
+  else if (controls)
+    json_object_put(controls);
   return caps;
 }

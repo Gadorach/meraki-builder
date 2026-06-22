@@ -48,13 +48,15 @@ struct json_object *click_read_globals(struct apply_result *result) {
 }
 
 static int checked_write(const char *field, const char *path,
-                         const char *value, struct apply_result *result) {
+                         const char *value, bool required,
+                         struct apply_result *result) {
   printf("%s global field=%s value=%s%s\n", get_time(), field, value,
          dry_run ? " dry_run=true" : "");
   int rc = dry_run ? 0 : click_write(path, value);
-  if (rc != 0)
-    apply_result_warn(result, "global %s failed: %s", field, strerror(-rc));
-  else
+  if (rc != 0) {
+    if (required) apply_result_fail(result, "global %s failed: %s", field, strerror(-rc));
+    else apply_result_warn(result, "optional global %s failed: %s", field, strerror(-rc));
+  } else
     apply_result_applied(result);
   return rc;
 }
@@ -68,13 +70,13 @@ static int apply_stp(struct json_object *value, struct apply_result *result) {
       json_object_get_int(json_object_object_get(value, "forward_delay")),
       json_object_get_int(json_object_object_get(value, "max_age")),
       json_object_get_int(json_object_object_get(value, "hold_count")));
-  return checked_write("stp", "/click/stp/set_params", command, result);
+  return checked_write("stp", "/click/stp/set_params", command, true, result);
 }
 
 static int apply_lacp(struct json_object *value, struct apply_result *result) {
   bool enabled = json_object_get_boolean(json_object_object_get(value, "enabled"));
   return checked_write("lacp", "/click/switch_port_table/enable_lacp_on_single_ports",
-                       enabled ? "true" : "false", result);
+                       enabled ? "true" : "false", true, result);
 }
 
 static int apply_multicast(struct json_object *value,
@@ -92,27 +94,27 @@ static int apply_multicast(struct json_object *value,
 
   if (checked_write("multicast.igmp_snooping",
                     "/click/configure_igmp_snoop/run",
-                    igmp ? "true" : "false", result) != 0) rc = -EIO;
+                    igmp ? "true" : "false", false, result) != 0) rc = -EIO;
   snprintf(buffer, sizeof(buffer), "%d", igmp_interval * 1000);
   if (checked_write("multicast.igmp_querier_interval",
                     "/click/igmp_snoop/default_querier_interval_msec",
-                    buffer, result) != 0) rc = -EIO;
+                    buffer, false, result) != 0) rc = -EIO;
   snprintf(buffer, sizeof(buffer), "%d", igmp_interval);
   if (checked_write("multicast.igmp_query_interval",
                     "/click/igmp_querier/query_interval",
-                    buffer, result) != 0) rc = -EIO;
+                    buffer, false, result) != 0) rc = -EIO;
 
   if (checked_write("multicast.mld_snooping",
                     "/click/configure_mld_snoop/run",
-                    mld ? "true" : "false", result) != 0) rc = -EIO;
+                    mld ? "true" : "false", false, result) != 0) rc = -EIO;
   snprintf(buffer, sizeof(buffer), "%d", mld_interval * 1000);
   if (checked_write("multicast.mld_querier_interval",
                     "/click/mld_snoop/default_querier_interval_msec",
-                    buffer, result) != 0) rc = -EIO;
+                    buffer, false, result) != 0) rc = -EIO;
   snprintf(buffer, sizeof(buffer), "%d", mld_interval);
   if (checked_write("multicast.mld_query_interval",
                     "/click/mld_querier/query_interval",
-                    buffer, result) != 0) rc = -EIO;
+                    buffer, false, result) != 0) rc = -EIO;
   return rc;
 }
 
@@ -121,16 +123,17 @@ static int apply_globals(struct json_object *full_config,
                          struct apply_result *result) {
   struct json_object *value = NULL;
   struct json_object *changed = NULL;
+  int rc = 0;
   if ((!delta || json_object_object_get_ex(delta, "stp", &changed)) &&
-      json_object_object_get_ex(full_config, "stp", &value))
-    apply_stp(value, result);
+      json_object_object_get_ex(full_config, "stp", &value) &&
+      apply_stp(value, result) != 0) rc = -EIO;
   if ((!delta || json_object_object_get_ex(delta, "lacp", &changed)) &&
-      json_object_object_get_ex(full_config, "lacp", &value))
-    apply_lacp(value, result);
+      json_object_object_get_ex(full_config, "lacp", &value) &&
+      apply_lacp(value, result) != 0) rc = -EIO;
   if ((!delta || json_object_object_get_ex(delta, "multicast", &changed)) &&
       json_object_object_get_ex(full_config, "multicast", &value))
-    apply_multicast(value, result);
-  return 0;
+    apply_multicast(value, result); /* donor-dependent handlers are optional */
+  return rc;
 }
 
 int click_apply_globals_full(struct json_object *config,

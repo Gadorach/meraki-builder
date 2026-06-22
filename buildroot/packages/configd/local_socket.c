@@ -14,12 +14,12 @@
 #include "service_ops.h"
 #include "time_ops.h"
 #include "json_util.h"
+#include "socket_io.h"
 
 #include <errno.h>
 #include <fcntl.h>
 #include <json-c/json.h>
 #include <poll.h>
-#include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -37,15 +37,7 @@ static int send_json(int fd, const char *type, struct json_object *data) {
   json_object_object_add(reply, "type", json_object_new_string(type));
   json_object_object_add(reply, "data", data ? json_object_get(data) : json_object_new_null());
   const char *text = json_object_to_json_string_ext(reply, JSON_C_TO_STRING_PLAIN);
-  size_t left = strlen(text);
-  const char *cursor = text;
-  int rc = 0;
-  while (left) {
-    ssize_t wrote = write(fd, cursor, left);
-    if (wrote < 0) { if (errno == EINTR) continue; rc = -errno; break; }
-    cursor += wrote; left -= (size_t)wrote;
-  }
-  if (rc == 0 && write(fd, "\n", 1) != 1) rc = -EIO;
+  int rc = socket_write_line(fd, text, strlen(text));
   json_object_put(reply);
   return rc;
 }
@@ -119,15 +111,27 @@ static void handle_client(int fd) {
   if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &credentials, &credentials_length) != 0) {
     send_error(fd, 500, "unable to identify local client"); return;
   }
-  struct passwd *passwd = getpwuid(credentials.uid);
-  const char *username = passwd && passwd->pw_name ? passwd->pw_name : "";
-  enum postmerkos_role role = role_for_username(username);
-  if (role == POSTMERKOS_ROLE_NONE) { send_error(fd, 403, "account has no management role"); return; }
+  char username[128] = {0};
+  if (account_username_for_uid(credentials.uid, username, sizeof(username)) != 0) {
+    send_error(fd, 403, "local account could not be resolved");
+    return;
+  }
+  enum postmerkos_role role = credentials.uid == 0
+      ? POSTMERKOS_ROLE_ADMIN : role_for_username(username);
+  if (role == POSTMERKOS_ROLE_NONE) {
+    send_error(fd, 403, "account has no management role");
+    return;
+  }
 
-  char buffer[LOCAL_REQUEST_MAX + 1];
-  ssize_t got = read(fd, buffer, LOCAL_REQUEST_MAX);
-  if (got <= 0) return;
-  buffer[got] = '\0';
+  char buffer[LOCAL_REQUEST_MAX + 2];
+  ssize_t got = socket_read_line(fd, buffer, sizeof(buffer), 5000);
+  if (got == 0) return;
+  if (got < 0) {
+    if (got == -EMSGSIZE) send_error(fd, 413, "request exceeds local protocol limit");
+    else if (got != -ECONNRESET && got != -EPIPE)
+      send_error(fd, 400, got == -ETIMEDOUT ? "request timed out" : "request read failed");
+    return;
+  }
   struct json_object *request = json_tokener_parse(buffer);
   const char *type = request_type(request);
   if (!request || !type) { send_error(fd, 400, "malformed request"); goto done; }
@@ -137,7 +141,7 @@ static void handle_client(int fd) {
     json_object_object_add(data, "message", json_object_new_string("pong"));
     send_json(fd, "ack", data); json_object_put(data);
   } else if (!strcmp(type, "session")) {
-    struct json_object *identity = role_identity_json(username);
+    struct json_object *identity = role_identity_json_for_uid(credentials.uid);
     send_json(fd, "session", identity); json_object_put(identity);
   } else if (!strcmp(type, "status.get") && role_has_capability(role, "status.read")) {
     struct json_object *status = get_status();
@@ -208,9 +212,8 @@ static void handle_client(int fd) {
       char error[256] = {0};
       struct apply_result result;
       apply_result_init(&result);
-      int rc = validate_configuration(candidate, error, sizeof(error));
-      if (rc == 0) rc = save_config_file(candidate, error, sizeof(error));
-      if (rc == 0) rc = config_apply_full(candidate, &result);
+      int rc = config_replace_validate_save_apply(candidate, &result,
+                                                  error, sizeof(error));
       if (rc != 0) send_error(fd, 400, error[0] ? error : "configuration restore failed");
       else {
         struct json_object *ack = apply_result_json(&result, "Configuration restored");
@@ -224,7 +227,7 @@ static void handle_client(int fd) {
     struct json_object *report=compatibility_report_json();send_json(fd,"compatibility_report",report);json_object_put(report);
   } else if (!strcmp(type, "compatibility.ack") && role_has_capability(role, "status.read")) {
     char error[256]={0};if(compatibility_acknowledge(error,sizeof(error))!=0)send_error(fd,400,error);else{struct json_object *ack=json_object_new_object();json_object_object_add(ack,"message",json_object_new_string("Compatibility notice dismissed for this firmware"));send_json(fd,"ack",ack);json_object_put(ack);}
-  } else if (!strcmp(type, "users.get") && role_has_capability(role, "status.read")) {
+  } else if (!strcmp(type, "users.get") && role_has_capability(role, "users.manage")) {
     struct json_object *users=auth_list_users();send_json(fd,"users",users);json_object_put(users);
   } else if (!strcmp(type, "users.create")) {
     struct json_object *data=request_data(request);const char *target=object_string(data,"username"),*password=object_string(data,"password"),*new_role=object_string(data,"role");

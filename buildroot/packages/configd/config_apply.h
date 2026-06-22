@@ -18,5 +18,8 @@ int config_merge_validate_save_apply(struct json_object *delta,
                                      struct apply_result *result,
                                      bool defer_network,
                                      char *error, size_t error_size);
+int config_replace_validate_save_apply(struct json_object *candidate,
+                                       struct apply_result *result,
+                                       char *error, size_t error_size);
 
 #endif

@@ -9,7 +9,7 @@ start() {
     # set a device specific password
     if [ $(grep -c $password_salt /etc/shadow) -eq 1 ]; then
         serial=$(board_data serial) 
-        if [ ! -z ${serial} ]; then
+        if [ -n "$serial" ]; then
             echo -e "${serial}\n${serial}" | passwd -a sha256 root >/dev/null 2>&1
             echo "Set root password to device serial number"
             mkdir -p /config/postmerkos

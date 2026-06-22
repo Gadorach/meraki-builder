@@ -8,6 +8,10 @@ CONFIGD=${CONFIGD:-/bin/configd}
 CTL=${POSTMERKOSCTL:-/usr/bin/postmerkosctl}
 [ -x "$CTL" ] || CTL=postmerkosctl
 ROLE=none
+USERNAME=
+CAPABILITIES=
+SESSION_STATE=unknown
+SESSION_ERROR=
 KERNEL_PRINTK=
 TMP_RESPONSE=/tmp/postmerkos-console.$$.out
 restore_console_chatter() {
@@ -80,8 +84,46 @@ valid_mtu() { is_number "$1" && [ "$1" -ge 576 ] && [ "$1" -le 9216 ]; }
 valid_vlan_list() { [ -n "$1" ] && ! printf '%s' "$1" | grep -q '[^0-9,-]'; }
 valid_ipv4_text() { [ -n "$1" ] && ! printf '%s' "$1" | grep -q '[^0-9./]'; }
 valid_username() { [ -n "$1" ] && ! printf '%s' "$1" | grep -q '[^A-Za-z0-9_.-]'; }
-can() { "$CTL" has "$1" >/dev/null 2>&1; }
-refresh_role() { ROLE=$("$CTL" role 2>/dev/null || echo none); }
+refresh_session() {
+    local attempts=${1:-1} session rc
+    SESSION_STATE=unavailable SESSION_ERROR=
+    ROLE=none USERNAME= CAPABILITIES=
+    while [ "$attempts" -gt 0 ]; do
+        : >"$TMP_RESPONSE"
+        if session=$("$CTL" session --shell 2>"$TMP_RESPONSE"); then
+            POSTMERKOS_USERNAME= POSTMERKOS_ROLE=none POSTMERKOS_CAPABILITIES=
+            case "$session" in
+                *POSTMERKOS_USERNAME=*POSTMERKOS_ROLE=*POSTMERKOS_CAPABILITIES=*)
+                    eval "$session"
+                    USERNAME=${POSTMERKOS_USERNAME:-}
+                    ROLE=${POSTMERKOS_ROLE:-none}
+                    CAPABILITIES=${POSTMERKOS_CAPABILITIES:-}
+                    if [ -n "$USERNAME" ] && [ "$ROLE" != none ]; then
+                        SESSION_STATE=ok
+                    else
+                        SESSION_STATE=role-none
+                    fi
+                    return 0
+                    ;;
+                *) SESSION_STATE=malformed; SESSION_ERROR='configd returned a malformed session response'; return 1 ;;
+            esac
+        else
+            rc=$?
+            SESSION_ERROR=$(cat "$TMP_RESPONSE" 2>/dev/null || true)
+            [ -n "$SESSION_ERROR" ] || SESSION_ERROR="postmerkosctl session failed with status $rc"
+        fi
+        attempts=$((attempts - 1))
+        [ "$attempts" -gt 0 ] && sleep 1
+    done
+    return 1
+}
+can() {
+    case " $CAPABILITIES " in
+        *" $1 "*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+refresh_role() { refresh_session; }
 
 cfg_get() { "$CTL" get "$1" 2>/dev/null; }
 
@@ -132,12 +174,13 @@ detect_layout() {
     TOTAL_PORTS=$(cat /tmp/NUM_PORTS 2>/dev/null || echo 0)
     is_number "$TOTAL_PORTS" || TOTAL_PORTS=0
     if [ "$TOTAL_PORTS" -eq 0 ]; then
-        MODEL=$(sed -n 's/^MODEL=//p' /etc/boardinfo 2>/dev/null | head -n 1)
+        MODEL=$(sed -n 's/^MODEL=//p' /run/postmerkos/boardinfo 2>/dev/null | head -n 1)
         case "$MODEL" in
             MS220-8|MS220-8P) TOTAL_PORTS=10 ;;
+            MS220-24|MS220-24P|MS22|MS22P) TOTAL_PORTS=26 ;;
             MS320-24|MS320-24P) TOTAL_PORTS=28 ;;
             MS220-48*|MS320-48*|MS42|MS42P) TOTAL_PORTS=52 ;;
-            *) TOTAL_PORTS=24 ;;
+            *) TOTAL_PORTS=0 ;;
         esac
     fi
     case "$TOTAL_PORTS" in
@@ -582,22 +625,6 @@ EOF_PC
     done
 }
 
-select_overlay() {
-    echo 'Overlay policy:' >&2
-    echo '  1) preserve - keep settings byte-for-byte' >&2
-    echo '  2) migrate  - copy selected settings into a clean overlay' >&2
-    echo '  3) reset    - erase settings' >&2
-    echo '  4) image    - use overlay embedded in a full firmware image' >&2
-    printf 'Selection [1]: ' >&2
-    read -r selection
-    case "${selection:-1}" in
-        1) echo preserve ;;
-        2) echo migrate ;;
-        3) echo reset ;;
-        4) echo image ;;
-        *) echo preserve ;;
-    esac
-}
 
 display_configuration_copy() {
     local temp=/run/postmerkos/config-copy.$$.json hash
@@ -668,8 +695,44 @@ select_overlay() {
     esac
 }
 
+select_flash_scope() {
+    echo 'Flash scope:' >&2
+    echo '  1) system - update SquashFS and the selected JFFS2 policy' >&2
+    echo '  2) full   - overwrite loader, kernel, SquashFS, and JFFS2' >&2
+    printf 'Selection [1]: ' >&2
+    read -r selection
+    case "${selection:-1}" in
+        2) echo full ;;
+        *) echo system ;;
+    esac
+}
+
+select_force_mode() {
+    echo 'Force mode:' >&2
+    echo '  1) normal - require compatible/new metadata and avoid same-version reinstall' >&2
+    echo '  2) force  - allow reinstall/downgrade/development metadata exceptions; SHA-256 still required' >&2
+    printf 'Selection [1]: ' >&2
+    read -r selection
+    case "${selection:-1}" in
+        2) echo --force ;;
+        *) echo ;;
+    esac
+}
+
+select_artifact_contract() {
+    echo 'Artifact validation:' >&2
+    echo '  1) manifest - firmware, checksum, manifest, and manifest checksum' >&2
+    echo '  2) checksum - original firmware and checksum files only' >&2
+    printf 'Selection [1]: ' >&2
+    read -r selection
+    case "${selection:-1}" in
+        2) echo checksum ;;
+        *) echo manifest ;;
+    esac
+}
+
 firmware_menu() {
-    local file hash overlay server remote port url user password accept_arg
+    local file hash overlay server remote port url user password accept_arg force_arg scope contract scope_args contract_args
     while :; do
         heading 'Firmware Update'
         cat <<'EOF_FW'
@@ -678,25 +741,34 @@ firmware_menu() {
 3) Download and install by TFTP
 4) Download and install by HTTP/HTTPS
 5) Download and install by SFTP
-6) Verify a local image without flashing
+6) Receive and install an image over UART
+7) Verify a local image without flashing
 b) Back
 EOF_FW
         read_choice 'firmware> '
         case "$CHOICE" in
             1) heading 'Firmware update history'; cat /config/postmerkos/update-history/last.json 2>/dev/null || echo 'No completed update record exists.'; echo; cat /config/postmerkos/update-history/last.log 2>/dev/null || true; pause ;;
-            2|6)
+            2|7)
                 heading 'Local firmware image'
                 printf 'Firmware path: '; read -r file
                 [ -f "$file" ] || { echo 'File not found.'; pause; continue; }
                 hash=$(sha256sum "$file" | awk '{print $1}') || { echo 'Unable to hash firmware.'; pause; continue; }
-                overlay=$(select_overlay)
+                scope=$(select_flash_scope)
+                scope_args=
+                if [ "$scope" = full ]; then
+                    overlay=image
+                    scope_args=--full-flash
+                else
+                    overlay=$(select_overlay)
+                fi
                 accept_arg=
                 [ "$(cfg_get_device_compatibility 2>/dev/null || echo confirmed)" = untested ] && accept_arg=--accept-untested
-                if [ "$CHOICE" = 6 ]; then
-                    fw_update --sha256 "$hash" --overlay "$overlay" $accept_arg --verify-only "$file"
+                force_arg=$(select_force_mode)
+                if [ "$CHOICE" = 7 ]; then
+                    fw_update --sha256 "$hash" --overlay "$overlay" $scope_args $accept_arg $force_arg --verify-only "$file"
                 else
                     preupdate_backup_prompt || { echo 'Firmware update cancelled.'; pause; continue; }
-                    fw_update --sha256 "$hash" --overlay "$overlay" $accept_arg "$file"
+                    fw_update --sha256 "$hash" --overlay "$overlay" $scope_args $accept_arg $force_arg "$file"
                 fi
                 pause ;;
             3)
@@ -705,16 +777,24 @@ EOF_FW
                 printf 'TFTP server: '; read -r server
                 printf 'Remote firmware path: '; read -r remote
                 printf 'TFTP port [69]: '; read -r port; port=${port:-69}
-                overlay=$(select_overlay)
-                fw_update_tftp --server "$server" --file "$remote" --port "$port" --overlay "$overlay"
+                contract=$(select_artifact_contract)
+                [ "$contract" = checksum ] && contract_args=--no-manifest || contract_args=
+                scope=$(select_flash_scope)
+                if [ "$scope" = full ]; then overlay=image; scope_args=--full-flash; else overlay=$(select_overlay); scope_args=; fi
+                force_arg=$(select_force_mode)
+                fw_update_tftp --server "$server" --file "$remote" --port "$port" --overlay "$overlay" $contract_args $scope_args $force_arg
                 pause ;;
             4)
                 heading 'HTTP/HTTPS firmware update'
                 command -v fw_update_http >/dev/null 2>&1 || { echo 'HTTP updater support is not installed.'; pause; continue; }
                 preupdate_backup_prompt || { echo 'Firmware update cancelled.'; pause; continue; }
                 printf 'Direct firmware URL (blank opens configured catalog): '; read -r url
-                overlay=$(select_overlay)
-                if [ -n "$url" ]; then fw_update_http --url "$url" --overlay "$overlay"; else fw_update_http --overlay "$overlay"; fi
+                contract=$(select_artifact_contract)
+                [ "$contract" = checksum ] && contract_args=--no-manifest || contract_args=
+                scope=$(select_flash_scope)
+                if [ "$scope" = full ]; then overlay=image; scope_args=--full-flash; else overlay=$(select_overlay); scope_args=; fi
+                force_arg=$(select_force_mode)
+                if [ -n "$url" ]; then fw_update_http --url "$url" --overlay "$overlay" $contract_args $scope_args $force_arg; else fw_update_http --overlay "$overlay" $contract_args $scope_args $force_arg; fi
                 pause ;;
             5)
                 heading 'SFTP firmware update'
@@ -724,8 +804,22 @@ EOF_FW
                 printf 'Remote firmware path: '; read -r remote
                 printf 'Username: '; read -r user
                 password=$(read_secret 'Password: ')
-                overlay=$(select_overlay)
-                fw_update_sftp --server "$server" --file "$remote" --user "$user" --password "$password" --overlay "$overlay"
+                contract=$(select_artifact_contract)
+                [ "$contract" = checksum ] && contract_args=--no-manifest || contract_args=
+                scope=$(select_flash_scope)
+                if [ "$scope" = full ]; then overlay=image; scope_args=--full-flash; else overlay=$(select_overlay); scope_args=; fi
+                force_arg=$(select_force_mode)
+                fw_update_sftp --server "$server" --file "$remote" --user "$user" --password "$password" --overlay "$overlay" $contract_args $scope_args $force_arg
+                pause ;;
+            6)
+                heading 'UART firmware upload'
+                preupdate_backup_prompt || { echo 'Firmware update cancelled.'; pause; continue; }
+                scope=$(select_flash_scope)
+                if [ "$scope" = full ]; then overlay=image; scope_args=--full-flash; else overlay=$(select_overlay); scope_args=; fi
+                echo 'Waiting for the host flasher to send PMOSUART/1 framed data.'
+                echo 'Do not type into this console until the transfer finishes.'
+                force_arg=$(select_force_mode)
+                fw_update_uart --overlay "$overlay" $scope_args $force_arg
                 pause ;;
             b|B|0|'') return ;;
             *) echo 'Unknown option.'; sleep 1 ;;
@@ -945,7 +1039,7 @@ EOF_TIME
 service_management_menu() {
     while :; do
         heading 'Service Management'
-        "$CTL" services 2>/dev/null || true
+        "$CTL" services-summary 2>/dev/null || echo 'Service status is unavailable.'
         cat <<'EOF_SERVICE'
 
 1) SSH configuration
@@ -963,7 +1057,7 @@ EOF_SERVICE
             3) service_action_menu chrony Chrony ;;
             4) time_configuration_menu ;;
             5) "$CTL" services-apply; pause ;;
-            6) heading 'Management service logs'; for file in /tmp/configd.log /tmp/uhttpd.log /var/log/messages; do [ -f "$file" ] && { echo "--- $file ---"; tail -n 60 "$file"; }; done; pause ;;
+            6) heading 'Management service logs'; for file in /run/postmerkos/configd.log /run/postmerkos/websocket.log /run/postmerkos/buttond.log /run/postmerkos/serial-session.log /run/postmerkos/ledctl.log /tmp/uhttpd.log /var/log/messages; do [ -f "$file" ] && { echo "--- $file ---"; tail -n 60 "$file"; }; done; pause ;;
             b|B|0|'') return ;;
             *) echo 'Unknown option.'; sleep 1 ;;
         esac
@@ -1016,19 +1110,42 @@ Scriptable compatibility:
   config show                       print complete JSON configuration
   config backup FILE                write a plain JSON backup
   config restore FILE               validate, replace, and apply a backup
-  firmware status|local|tftp|http|sftp [arguments]
+  firmware status|local|tftp|http|sftp|uart [arguments]
   password [USER]                   change a local account password
 
 `postmerkos-cli` is retained as a compatibility symlink.
 EOF_USAGE
 }
 
+default_password_warning() {
+    [ -e /config/postmerkos/default-password-active ] || return 0
+    cat <<'EOF_PASSWORD'
+
+WARNING: The root password is still the switch serial number.
+Change it from User Management or with the passwd command.
+EOF_PASSWORD
+    pause
+}
+
 compatibility_first_access() {
-    local answer
+    local state
     [ "$("$CTL" compatibility-needed 2>/dev/null || echo no)" = yes ] || return 0
+    state=$(cfg_get_device_compatibility 2>/dev/null || echo untested)
     while :; do
-        heading 'Untested Switch Model'
-        cat <<'EOF_COMPAT'
+        if [ "$state" = known-incompatible ]; then
+            heading 'Known-Incompatible Firmware'
+            cat <<'EOF_COMPAT_BAD'
+This firmware release is explicitly marked known-incompatible with the detected
+switch model. This notice cannot be dismissed. Do not flash another image from
+this release or rely on port, PoE, LED, reset, or updater hardware behavior.
+
+1) Display diagnostic compatibility report
+2) Display issue-report information
+4) Return to the menu
+EOF_COMPAT_BAD
+        else
+            heading 'Untested Switch Model'
+            cat <<'EOF_COMPAT'
 This switch model is currently marked as untested.
 
 postmerkOS has booted successfully, but port mapping, PoE, LED control, and
@@ -1041,11 +1158,12 @@ report and any errors you observe.
 3) Dismiss for this firmware version
 4) Remind me next time
 EOF_COMPAT
+        fi
         read_choice 'compatibility> '
         case "$CHOICE" in
             1) heading 'Compatibility Report'; "$CTL" compatibility-report; pause ;;
             2) heading 'Compatibility Reporting'; echo 'Project issues: https://github.com/Gadorach/meraki-builder/issues'; echo; echo 'Include the diagnostic report, model, port/PoE behavior, and any boot or update errors.'; pause ;;
-            3) "$CTL" compatibility-ack; pause; return ;;
+            3) if [ "$state" = known-incompatible ]; then echo 'Known-incompatible releases cannot be acknowledged.'; pause; else "$CTL" compatibility-ack; pause; return; fi ;;
             4|b|B|0|'') return ;;
             *) echo 'Unknown option.'; sleep 1 ;;
         esac
@@ -1054,22 +1172,30 @@ EOF_COMPAT
 
 main_menu() {
     suppress_console_chatter
+    default_password_warning
     compatibility_first_access
     while :; do
         heading ''
         echo '- type the preferred option to continue'
         echo
-        printf '%-34s %s\n' '1) Status' '5) User Management'
-        printf '%-34s %s\n' '2) Port Configuration' '6) Service Management'
-        printf '%-34s %s\n' '3) Firmware Update' '7) Power Control'
-        printf '%-34s %s\n' '4) Backup & Restore' '8) Shell'
+        menu5= menu6= menu7= menu8= menu3= menu4=
+        can users.manage && menu5='5) User Management'
+        can services.manage && menu6='6) Service Management'
+        can system.reboot && menu7='7) Power Control'
+        can terminal.exec && menu8='8) Shell'
+        can firmware.update && menu3='3) Firmware Update'
+        can backup.create && menu4='4) Backup & Restore'
+        printf '%-34s %s\n' '1) Status' "$menu5"
+        printf '%-34s %s\n' '2) Port Configuration' "$menu6"
+        printf '%-34s %s\n' "$menu3" "$menu7"
+        printf '%-34s %s\n' "$menu4" "$menu8"
         echo '0) Log out'
         read_choice 'postmerkOS> '
         case "$CHOICE" in
             1) system_status_menu ;;
             2) port_configuration_menu ;;
             3) if can firmware.update; then firmware_menu; else echo 'Permission denied.'; pause; fi ;;
-            4) backup_restore_menu ;;
+            4) if can backup.create; then backup_restore_menu; else echo 'Permission denied.'; pause; fi ;;
             5) if can users.manage; then user_management_menu; else echo 'Permission denied.'; pause; fi ;;
             6) if can services.manage; then service_management_menu; else echo 'Permission denied.'; pause; fi ;;
             7) if can system.reboot; then power_control_menu; else echo 'Permission denied.'; pause; fi ;;
@@ -1092,14 +1218,22 @@ main_menu() {
 }
 
 main() {
-    local command sub port path
-    refresh_role
-    if [ "$ROLE" = none ]; then
-        echo 'This account has no postmerkOS management role.' >&2
+    local command sub port path wait_attempts
+    command=${1:-menu}
+    wait_attempts=1
+    [ "$command" = menu ] && wait_attempts=${POSTMERKOS_SESSION_WAIT:-30}
+    refresh_session "$wait_attempts" || true
+    if [ "$SESSION_STATE" != ok ]; then
+        if [ "$SESSION_STATE" = role-none ]; then
+            echo 'This account has no postmerkOS management role.' >&2
+        else
+            echo 'The postmerkOS management service is unavailable.' >&2
+            [ -n "$SESSION_ERROR" ] && printf 'Reason: %s\n' "$SESSION_ERROR" >&2
+            echo 'Use "postmerkosctl management-health" or the serial console status/logs commands for diagnostics.' >&2
+        fi
         return 1
     fi
     detect_layout
-    command=${1:-menu}
     case "$command" in
         menu) main_menu ;;
         status) "$CTL" summary ;;
@@ -1130,8 +1264,12 @@ main() {
             sub=${2:-}
             case "$sub" in
                 show) "$CTL" config ;;
-                backup) [ "$#" -eq 3 ] && "$CTL" backup "$3" || { usage >&2; return 2; } ;;
+                backup)
+                    can backup.create || { echo 'Permission denied.' >&2; return 1; }
+                    [ "$#" -eq 3 ] && "$CTL" backup "$3" || { usage >&2; return 2; }
+                    ;;
                 restore)
+                    can config.restore || { echo 'Permission denied.' >&2; return 1; }
                     [ "$#" -eq 3 ] || { usage >&2; return 2; }
                     "$CTL" restore "$3"
                     ;;
@@ -1142,15 +1280,24 @@ main() {
             sub=${2:-status}; shift 2 2>/dev/null || shift 1
             case "$sub" in
                 status) fw_update_status "$@" ;;
-                local) exec fw_update "$@" ;;
-                tftp) exec fw_update_tftp "$@" ;;
-                http) exec fw_update_http "$@" ;;
-                sftp) exec fw_update_sftp "$@" ;;
+                local|tftp|http|sftp|uart)
+                    can firmware.update || { echo 'Permission denied.' >&2; return 1; }
+                    case "$sub" in
+                        local) exec fw_update "$@" ;;
+                        tftp) exec fw_update_tftp "$@" ;;
+                        http) exec fw_update_http "$@" ;;
+                        sftp) exec fw_update_sftp "$@" ;;
+                        uart) exec fw_update_uart "$@" ;;
+                    esac
+                    ;;
                 *) usage >&2; return 2 ;;
             esac
             ;;
         password) passwd "${2:-root}" ;;
-        shell) POSTMERKOS_RAW_SHELL=1 exec /bin/sh -l ;;
+        shell)
+            can terminal.exec || { echo 'Permission denied.' >&2; return 1; }
+            POSTMERKOS_RAW_SHELL=1 exec /bin/sh -l
+            ;;
         help|-h|--help) usage ;;
         *) usage >&2; return 2 ;;
     esac

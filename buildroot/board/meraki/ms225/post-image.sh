@@ -111,18 +111,6 @@ create_uboot_flashable_image() {
     fi
 }
 
-create_redboot_flashable_image() {
-    download_redboot
-    create_redboot_header
-    create_squashfs
-    create_jffs2
-}
-
 # create image with u-boot bootloader
 create_uboot_flashable_image
 
-# WIP:
-# create image with redboot bootloader
-# note that kernels compiled for RedBoot **must** have the boot commandline
-# compiled into the kernel
-#create_redboot_flashable_image

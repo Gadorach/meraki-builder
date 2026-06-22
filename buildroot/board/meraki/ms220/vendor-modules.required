@@ -1,0 +1,16 @@
+# Common switch-stack objects.
+elts_meraki.ko
+merakiclick.ko
+proclikefs.ko
+
+# Luton26: MS22/MS22P and MS220-8/8P/24/24P.
+luton26/vc_click.ko
+luton26/vtss_core.ko
+
+# Single-chip Jaguar1: MS320-24/24P.
+jaguar/vc_click.ko
+jaguar/vtss_core.ko
+
+# Dual-chip Jaguar1: MS42/MS42P and 48-port MS220/MS320 models.
+jaguar_dual/vc_click.ko
+jaguar_dual/vtss_core.ko

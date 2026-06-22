@@ -11,8 +11,8 @@ CSPT=/click/switch_port_table
 POE=0
 MODEL="unknown"
 
-if [ -f /etc/boardinfo ]; then
-  . /etc/boardinfo
+if [ -f /run/postmerkos/boardinfo ]; then
+  . /run/postmerkos/boardinfo
   if [ $(echo $MODEL | grep -c -E 'P$') -eq 1 ]; then
     POE=1
     port_poe_statuses=$(pd690xx -l)

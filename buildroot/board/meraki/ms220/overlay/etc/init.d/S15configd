@@ -1,57 +1,111 @@
 #!/bin/sh
-DAEMON=/bin/configd
-PIDFILE=/run/configd.pid
-SOCKET=/run/postmerkos/configd.sock
-LOGFILE=/tmp/configd.log
-CONFIG=/etc/switch.json
+DAEMON=${CONFIGD_DAEMON:-/bin/configd}
+SUPERVISOR=${CONFIGD_SUPERVISOR:-/usr/sbin/postmerkos-configd-supervisor}
+SUPERVISOR_PIDFILE=${CONFIGD_SUPERVISOR_PIDFILE:-/run/configd-supervisor.pid}
+CHILD_PIDFILE=${CONFIGD_CHILD_PIDFILE:-/run/configd.pid}
+STOP_FILE=${CONFIGD_STOP_FILE:-/run/postmerkos/configd.stop}
+SOCKET=${CONFIGD_SOCKET:-/run/postmerkos/configd.sock}
+LOGFILE=${CONFIGD_LOGFILE:-/run/postmerkos/configd.log}
+CONFIG=${CONFIGD_CONFIG:-/etc/switch.json}
+WEBSOCKET_PORT=${CONFIGD_WEBSOCKET_PORT:-4001}
+CTL=${CONFIGD_CTL:-/usr/bin/postmerkosctl}
+WEB_UI_MARKER=${CONFIGD_WEB_UI_MARKER:-/etc/postmerkos/features/web-ui}
 
-is_running() {
-    [ -s "$PIDFILE" ] || return 1
-    pid=$(cat "$PIDFILE" 2>/dev/null) || return 1
+pid_running() {
+    [ -s "$1" ] || return 1
+    pid=$(cat "$1" 2>/dev/null) || return 1
     kill -0 "$pid" 2>/dev/null
 }
-
-wait_ready() {
-    attempts=0
-    while [ "$attempts" -lt 30 ]; do
-        is_running || return 1
-        [ -S "$SOCKET" ] && return 0
-        attempts=$((attempts + 1))
-        sleep 1
+is_running() { pid_running "$CHILD_PIDFILE"; }
+supervisor_running() { pid_running "$SUPERVISOR_PIDFILE"; }
+websocket_enabled() { "$DAEMON" --features 2>/dev/null | grep -q '^websocket: enabled$'; }
+websocket_required() { [ -e "$WEB_UI_MARKER" ]; }
+port_listening() {
+    hex=$(printf '%04X' "$WEBSOCKET_PORT")
+    for table in /proc/net/tcp /proc/net/tcp6; do
+        [ -r "$table" ] || continue
+        awk -v suffix=":$hex" '
+          $4 == "0A" && substr($2, length($2)-length(suffix)+1) == suffix {
+            split($2, address, ":");
+            if (address[1] == "00000000" || address[1] == "00000000000000000000000000000000") found=1
+          }
+          END { exit found ? 0 : 1 }' "$table" && return 0
     done
     return 1
 }
-
+wait_ready() {
+    attempts=0
+    need_websocket=0
+    websocket_required && need_websocket=1
+    if [ "$need_websocket" -eq 1 ] && ! websocket_enabled; then
+        echo "configd binary lacks required WebSocket support" >>"$LOGFILE"
+        return 2
+    fi
+    while [ "$attempts" -lt 30 ]; do
+        supervisor_running || return 1
+        if is_running && [ -S "$SOCKET" ]; then
+            if [ "$need_websocket" -eq 0 ]; then
+                "$CTL" session --json >/dev/null 2>&1 && return 0
+            elif port_listening && "$CTL" management-health --quiet >/dev/null 2>&1; then
+                return 0
+            fi
+        fi
+        attempts=$((attempts + 1)); sleep 1
+    done
+    return 1
+}
 start() {
     printf 'Starting configd: '
     [ -x "$DAEMON" ] || { echo 'FAIL (missing binary)'; return 1; }
-    [ -d /click ] || { echo 'FAIL (/click unavailable)'; return 1; }
-    mkdir -p /run/postmerkos
-    rm -f "$SOCKET"
-    if is_running; then echo 'already running'; return 0; fi
-    touch "$LOGFILE"
-    start-stop-daemon -S -q -b -m -p "$PIDFILE" -x "$DAEMON" -- \
-        -c "$CONFIG" -s "$SOCKET" -w 4001 -p 3 >>"$LOGFILE" 2>&1
+    [ -x "$SUPERVISOR" ] || { echo 'FAIL (missing supervisor)'; return 1; }
+    [ -d "${CONFIGD_CLICK_DIR:-/click}" ] || { echo 'FAIL (/click unavailable)'; return 1; }
+    if websocket_required && ! websocket_enabled; then
+        echo 'FAIL (web image contains WebSocket-disabled configd)'
+        mkdir -p "$(dirname "$LOGFILE")"
+        "$DAEMON" --features >"$LOGFILE" 2>&1 || true
+        echo 'configd binary lacks required WebSocket support' >>"$LOGFILE"
+        return 1
+    fi
+    mkdir -p "$(dirname "$LOGFILE")" "$(dirname "$SOCKET")" "$(dirname "$STOP_FILE")"
+    rm -f "$STOP_FILE" "$SOCKET" "$CHILD_PIDFILE"
+    if supervisor_running; then echo 'already running'; return 0; fi
+    : >"$LOGFILE"
+    "$DAEMON" --features >>"$LOGFILE" 2>&1 || true
+    CONFIGD_DAEMON="$DAEMON" CONFIGD_CONFIG="$CONFIG" CONFIGD_SOCKET="$SOCKET" \
+      CONFIGD_WEBSOCKET_PORT="$WEBSOCKET_PORT" \
+      "$SUPERVISOR" >>"$LOGFILE" 2>&1 &
+    echo $! >"$SUPERVISOR_PIDFILE"
     if ! wait_ready; then
         echo FAIL
-        tail -n 80 "$LOGFILE"
+        echo "configd management health did not become ready on port $WEBSOCKET_PORT"
+        tail -n 100 "$LOGFILE"
         stop >/dev/null 2>&1 || true
         return 1
     fi
     echo OK
 }
-
 stop() {
     printf 'Stopping configd: '
-    if is_running; then start-stop-daemon -K -q -p "$PIDFILE" -x "$DAEMON" || true; fi
-    rm -f "$PIDFILE" "$SOCKET"
+    mkdir -p "$(dirname "$STOP_FILE")"; : >"$STOP_FILE"
+    if is_running; then kill "$(cat "$CHILD_PIDFILE")" 2>/dev/null || true; fi
+    if supervisor_running; then kill "$(cat "$SUPERVISOR_PIDFILE")" 2>/dev/null || true; fi
+    attempts=0
+    while supervisor_running && [ "$attempts" -lt 10 ]; do sleep 1; attempts=$((attempts+1)); done
+    rm -f "$SUPERVISOR_PIDFILE" "$CHILD_PIDFILE" "$SOCKET" "$STOP_FILE"
     echo OK
 }
-
+status() {
+    supervisor_running && is_running && [ -S "$SOCKET" ] || return 1
+    if websocket_required; then
+        websocket_enabled && "$CTL" management-health --quiet >/dev/null 2>&1
+    else
+        "$CTL" session --json >/dev/null 2>&1
+    fi
+}
 case "$1" in
     start) start ;;
     stop) stop ;;
     restart|reload) stop; sleep 1; start ;;
-    status) is_running && [ -S "$SOCKET" ] ;;
+    status) status ;;
     *) echo "Usage: $0 {start|stop|restart|reload|status}"; exit 1 ;;
 esac

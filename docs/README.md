@@ -21,6 +21,7 @@
 ## Builders
 
 - [Switch builds](building/switches.md)
+- [Authoritative upstream source policy](building/upstream-source-policy.md)
 - [MX80 build](building/mx80.md)
 - [MX84 build status](building/mx84.md)
 - [Artifacts and validation](building/artifacts.md)
@@ -32,9 +33,13 @@
 - [configd](architecture/configd.md)
 - [Configuration schema](architecture/configuration-schema.md)
 - [Firmware updater](architecture/firmware-updater.md)
+- [Pre-kernel UART recovery](architecture/pre-kernel-uart-recovery.md)
+- [Pre-boot UART hardware preflight](architecture/pre-boot-uart-hardware-preflight.md)
+- [Recovery flat-binary entry contract](architecture/recovery-flat-binary-entry.md)
 - [Click graph](architecture/click-system.md)
 - [Adding a model](development/adding-model.md)
 - [Compatibility testing](development/compatibility-testing.md)
+- [Runtime stabilization hardware testing](development/runtime-stabilization-testing.md)
 
 ## Hardware and research
 
@@ -42,6 +47,7 @@
 - [Vitesse switch hardware access](hardware/vitesse-switches.md)
 - [Cooling notes](hardware/cooling.md)
 - [Research utilities](research/README.md)
+- [OpenVTSS runtime boundaries](research/openvtss-runtime-boundaries.md)
 
 ## History
 
@@ -49,3 +55,8 @@
 - [Resolved issues](history/resolved-issues.md)
 - [Legacy build systems](history/legacy-build-systems.md)
 - [Change history](history/changelog.md)
+- [UART recovery package-header handoff correction](history/uart-recovery-package-header-handoff.md)
+
+## Adaptive recovery
+
+- [PMOSREC v3 adaptive UART transport](architecture/pmosrec-v3-adaptive-uart.md)

@@ -1,0 +1,126 @@
+#!/bin/sh
+set -u
+
+. /usr/lib/fwupdate/common.sh
+
+usage() {
+    cat <<'USAGE'
+usage: fw_update_uart [options]
+
+Receive a firmware image as checksummed PMOSUART/1 ASCII frames over the active
+serial terminal, reconstruct it in tmpfs, and pass it to the normal fw_update
+validation and flashing engine. An optional release manifest may be transferred
+in the same session.
+
+Options passed to fw_update:
+  --overlay POLICY      preserve (default), migrate, reset, or image
+  --full-flash          overwrite loader, kernel, SquashFS, and JFFS2
+  --accept-full-flash   noninteractive full-flash acknowledgement
+  --accept-untested     accept an untested artifact
+  --yes                 do not ask for the final UPGRADE confirmation
+  --force               allow recovery/development metadata exceptions
+  --verify-only         validate without writing flash
+  --dry-run             prepare without stopping services or writing flash
+
+Transport option:
+  --idle-timeout SEC    abort when no complete frame arrives (default 120)
+
+The receiver writes only below /run/fwupdate/uploads. PMOSUART/1 validates every
+Base64 frame with a sequence number and CRC-32, then validates the complete
+object byte count and SHA-256 before fw_update is started.
+USAGE
+}
+
+OVERLAY=preserve
+FULL_FLASH=0
+ACCEPT_FULL=0
+ACCEPT_UNTESTED=0
+ASSUME_YES=0
+FORCE=0
+VERIFY_ONLY=0
+DRY_RUN=0
+IDLE_TIMEOUT=120
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --overlay) [ "$#" -ge 2 ] || fw_die "--overlay requires a value"; OVERLAY=$2; shift 2 ;;
+        --full-flash) FULL_FLASH=1; shift ;;
+        --accept-full-flash) ACCEPT_FULL=1; shift ;;
+        --accept-untested) ACCEPT_UNTESTED=1; shift ;;
+        --yes) ASSUME_YES=1; shift ;;
+        --force) FORCE=1; shift ;;
+        --verify-only) VERIFY_ONLY=1; shift ;;
+        --dry-run) DRY_RUN=1; shift ;;
+        --idle-timeout) [ "$#" -ge 2 ] || fw_die "--idle-timeout requires a value"; IDLE_TIMEOUT=$2; shift 2 ;;
+        --help|-h) usage; exit 0 ;;
+        *) fw_die "unknown UART update option: $1" ;;
+    esac
+done
+
+case "$OVERLAY" in preserve|migrate|reset|image) ;; *) fw_die "invalid overlay policy: $OVERLAY" ;; esac
+case "$IDLE_TIMEOUT" in ''|*[!0-9]*) fw_die "invalid UART idle timeout" ;; esac
+[ "$IDLE_TIMEOUT" -ge 10 ] && [ "$IDLE_TIMEOUT" -le 3600 ] || fw_die "UART idle timeout must be 10-3600 seconds"
+[ "$(id -u)" -eq 0 ] || fw_die "fw_update_uart must run as root"
+
+RECEIVER=${FWUPDATE_SERIAL_RECEIVER:-/usr/libexec/fwupdate/fwserialrx}
+[ -x "$RECEIVER" ] || fw_die "UART receiver is unavailable: $RECEIVER"
+command -v fw_update >/dev/null 2>&1 || fw_die "fw_update is unavailable"
+
+BASE=${FWUPDATE_UPLOAD_DIR:-/run/fwupdate/uploads}
+mkdir -p "$BASE" || fw_die "unable to create UART upload directory"
+chmod 0700 "$BASE" 2>/dev/null || true
+WORK=$(mktemp -d "$BASE/uart.XXXXXX") || fw_die "unable to allocate UART upload workspace"
+chmod 0700 "$WORK"
+FIRMWARE=$WORK/firmware.bin
+MANIFEST=$WORK/firmware.manifest.json
+METADATA=$WORK/transfer.env
+OLD_STTY=
+
+cleanup_uart() {
+    rc=$?
+    [ -n "${OLD_STTY:-}" ] && stty "$OLD_STTY" 2>/dev/null || true
+    rm -rf "$WORK"
+    trap - EXIT HUP INT TERM
+    exit "$rc"
+}
+trap cleanup_uart EXIT HUP INT TERM
+
+if command -v stty >/dev/null 2>&1; then
+    OLD_STTY=$(stty -g 2>/dev/null || true)
+    [ -n "$OLD_STTY" ] && stty -echo 2>/dev/null || true
+fi
+
+printf '%s\n' 'UART firmware receiver starting. Send a PMOSUART/1 transfer now.'
+printf '%s\n' 'The image is reconstructed in RAM and will still pass normal fw_update validation.'
+"$RECEIVER" --firmware "$FIRMWARE" --manifest "$MANIFEST" \
+    --metadata "$METADATA" --idle-timeout "$IDLE_TIMEOUT"
+receiver_rc=$?
+[ -n "$OLD_STTY" ] && stty "$OLD_STTY" 2>/dev/null || true
+OLD_STTY=
+[ "$receiver_rc" -eq 0 ] || fw_die "UART transfer failed"
+
+[ -r "$METADATA" ] || fw_die "UART receiver did not produce transfer metadata"
+# The receiver restricts every value to digits, hexadecimal, or a basename made
+# from [A-Za-z0-9._-], so this file is safe to source.
+. "$METADATA"
+[ "${protocol:-}" = 1 ] || fw_die "unsupported UART transfer metadata"
+[ -f "$FIRMWARE" ] || fw_die "UART firmware object is missing"
+valid_sha256 "${firmware_sha256:-}" || fw_die "UART firmware SHA-256 metadata is invalid"
+case "${firmware_name:-}" in ''|*/*|*[!A-Za-z0-9._-]*) fw_die "UART artifact name is invalid" ;; esac
+
+set -- --sha256 "$firmware_sha256" --artifact-name "$firmware_name" \
+    --source uart --overlay "$OVERLAY"
+[ "${manifest_received:-0}" -eq 1 ] && set -- "$@" --manifest "$MANIFEST"
+[ "$FULL_FLASH" -eq 1 ] && set -- "$@" --full-flash
+[ "$ACCEPT_FULL" -eq 1 ] && set -- "$@" --accept-full-flash
+[ "$ACCEPT_UNTESTED" -eq 1 ] && set -- "$@" --accept-untested
+[ "$ASSUME_YES" -eq 1 ] && set -- "$@" --yes
+[ "$FORCE" -eq 1 ] && set -- "$@" --force
+[ "$VERIFY_ONLY" -eq 1 ] && set -- "$@" --verify-only
+[ "$DRY_RUN" -eq 1 ] && set -- "$@" --dry-run
+set -- "$@" "$FIRMWARE"
+
+printf 'UART transfer complete: %s bytes, SHA-256 %s\n' "$firmware_bytes" "$firmware_sha256"
+[ "${manifest_received:-0}" -eq 1 ] && printf 'Release manifest received: %s\n' "$manifest_name"
+fw_update "$@"
+exit $?

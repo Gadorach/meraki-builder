@@ -6,7 +6,7 @@ for cmd in tar rsync python3 patch make; do need "$cmd"; done
 [[ -f "$KERNEL_HEADERS_TARBALL" ]] || die "Kernel headers are missing. Run make kernel first."
 [[ -d "$SWITCH_DIR/.git" ]] || die "Kernel/OpenWrt source checkout is missing. Run make sources first."
 [[ -d "$DONOR_ROOT/lib/modules" ]] || die "Donor modules are missing. Run make donor first."
-[[ -f "$LOADER_ARTIFACT" ]] || die "RedBoot loader is missing. Run make donor first."
+[[ -f "$LOADER_ARTIFACT" ]] || die "Source-built meraki-redboot is missing. Run make loader first."
 
 "$SCRIPT_DIR/verify-inputs.sh"
 
@@ -30,8 +30,7 @@ mkdir -p "$BUILDROOT_DIR/board"
 rsync -a "$REPO_ROOT/buildroot/board/meraki/" "$BUILDROOT_DIR/board/meraki/"
 
 log "Synchronizing custom Buildroot packages"
-# Remove package names used by earlier versions of this workflow so an existing
-# Buildroot work tree cannot retain stale recipes after a rename.
+# Remove conflicting package directories before synchronizing the authoritative recipes.
 rm -rf "$BUILDROOT_DIR/package/clickswstatus" "$BUILDROOT_DIR/package/find_hdr" \
   "$BUILDROOT_DIR/package/postmerkos-cli"
 for src in "$REPO_ROOT"/buildroot/packages/*; do
@@ -47,8 +46,8 @@ from pathlib import Path
 import sys
 p = Path(sys.argv[1])
 s = p.read_text()
-# Remove direct source entries installed by historical line-number patches.
-legacy = {
+# Remove direct source entries that conflict with the package-managed implementation.
+conflicting_entries = {
     'source "package/click/Config.in"',
     'source "package/clickswstatus/Config.in"',
     'source "package/status/Config.in"',
@@ -62,7 +61,7 @@ legacy = {
     'source "package/postmerkos-cli/Config.in"',
     'source "package/Config.in.ms42p"',
 }
-s = '\n'.join(line for line in s.splitlines() if line.strip() not in legacy) + '\n'
+s = '\n'.join(line for line in s.splitlines() if line.strip() not in conflicting_entries) + '\n'
 start = '# BEGIN MS42P CUSTOM PACKAGES'
 end = '# END MS42P CUSTOM PACKAGES'
 block = f'{start}\nsource "package/Config.in.ms42p"\n{end}\n'
@@ -79,7 +78,7 @@ p.write_text(s)
 PY
 
 # Apply repository-maintained Buildroot patches without depending on line numbers
-# in package/Config.in. The package registration patches were intentionally removed.
+# in package/Config.in. Registration is generated directly from the maintained package index.
 for patch_file in "$REPO_ROOT"/buildroot/patches/*.patch; do
   [[ -f "$patch_file" ]] || continue
   if patch --dry-run -N -p0 -d "$BUILDROOT_DIR" < "$patch_file" >/dev/null 2>&1; then
@@ -93,8 +92,14 @@ done
 
 log "Constructing generated binary overlay"
 rm -rf "$GENERATED_OVERLAY"
-mkdir -p "$GENERATED_OVERLAY/lib/modules"
-rsync -a --delete "$DONOR_ROOT/lib/modules/" "$GENERATED_OVERLAY/lib/modules/"
+mkdir -p "$GENERATED_OVERLAY"
+
+# Keep a board-local copy inside the prepared Buildroot tree. The post-build
+# script installs from this authoritative payload, so a stale/moved absolute
+# BR2_ROOTFS_OVERLAY path cannot silently omit the vendor objects.
+"$SCRIPT_DIR/stage-vendor-modules.sh" \
+  "$GENERATED_OVERLAY/lib/modules" \
+  "$BUILDROOT_DIR/board/meraki/ms220/vendor-modules"
 
 case "${DONOR_ETC_POLICY:-modules}" in
   modules|none)
@@ -195,6 +200,12 @@ else
   ! grep -q '^BR2_PACKAGE_LIBWEBSOCKETS=y$' "$CONFIG" || die "Console-only build unexpectedly retained libwebsockets"
 fi
 grep -q '^BR2_PACKAGE_POSTMERKOS_CONSOLE=y$' "$CONFIG" || die "Buildroot did not retain POSTMERKOS_CONSOLE"
+grep -q '^BR2_PACKAGE_POSTMERKOS_HARDWARE=y$' "$CONFIG" || die "Buildroot did not retain POSTMERKOS_HARDWARE"
+grep -q '^BR2_PACKAGE_JSON_C=y$' "$CONFIG" || die "Buildroot did not retain JSON-C"
+grep -q '^BR2_PACKAGE_LIBCURL=y$' "$CONFIG" || die "Buildroot did not retain libcurl for HTTP(S)/SFTP firmware transport"
+grep -q '^BR2_PACKAGE_MBEDTLS=y$' "$CONFIG" || die "Buildroot did not retain mbed TLS for verified HTTPS"
+grep -q '^BR2_PACKAGE_LIBSSH2=y$' "$CONFIG" || die "Buildroot did not retain libssh2 for SFTP"
+grep -q '^BR2_PACKAGE_CA_CERTIFICATES=y$' "$CONFIG" || die "Buildroot did not retain CA certificates"
 if grep -q '^BR2_PACKAGE_JQ=y$' "$CONFIG"; then die "Buildroot unexpectedly retained jq for the console"; fi
 ! grep -q '^BR2_PACKAGE_LINUX_PAM=y$' "$CONFIG" || die "Linux-PAM must remain disabled for the 8 MiB image"
 ! grep -q '^BR2_TOOLCHAIN_BUILDROOT_WCHAR=y$' "$CONFIG" || die "uClibc wchar support must remain disabled for the compact image"
