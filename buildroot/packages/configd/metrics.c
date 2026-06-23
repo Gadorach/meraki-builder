@@ -211,6 +211,25 @@ static void write_all(int cfd, const char *data, size_t len) {
   }
 }
 
+/* Close gracefully so the kernel sends FIN, not RST. We only read the request
+ * line, so the client's remaining request headers sit unread in the RX queue;
+ * close() with unread data would emit a RST and truncate the response the
+ * client is still reading. Half-close our write side, then drain the input
+ * with a bounded linger before closing. */
+static void lingering_close(int cfd) {
+  shutdown(cfd, SHUT_WR);
+  long deadline = now_monotonic_ms() + 1000;  /* cap linger at ~1s */
+  for (;;) {
+    long remaining = deadline - now_monotonic_ms();
+    if (remaining <= 0) break;
+    struct pollfd pfd = { cfd, POLLIN, 0 };
+    if (poll(&pfd, 1, (int)remaining) <= 0) break;
+    char buf[512];
+    if (recv(cfd, buf, sizeof(buf), 0) <= 0) break;  /* 0 = client closed */
+  }
+  close(cfd);
+}
+
 void metrics_server_service(const struct portstats_snapshot *snap,
                             const struct device_health *health) {
   if (g_listen_fd < 0) return;
@@ -244,6 +263,6 @@ void metrics_server_service(const struct portstats_snapshot *snap,
       const char *nf = "HTTP/1.0 404 Not Found\r\nConnection: close\r\n\r\n";
       write_all(cfd, nf, strlen(nf));
     }
-    close(cfd);
+    lingering_close(cfd);
   }
 }
