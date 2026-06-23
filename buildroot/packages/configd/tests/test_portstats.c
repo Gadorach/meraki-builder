@@ -130,6 +130,32 @@ int main(void) {
   assert(dup.ports[5].rx_octets == 200ULL);
   assert(dup.count == 1);
 
+  /* zero-length port submessage: valid, no bogus port stored */
+  struct portstats_snapshot zlen;
+  unsigned char z[128]; size_t zn = 0;
+  zn += put_varint_field(z + zn, 2, 42ULL);
+  zn += put_ld_field(z + zn, 3, sub, 0);  /* plen=0 */
+  assert(portstats_decode(z, zn, &zlen) == 0);
+  assert(zlen.valid == 1);
+  assert(zlen.count == 0);
+
+  /* port submessage with unknown length-delimited field (wire-type 2) is skipped */
+  struct portstats_snapshot skip;
+  unsigned char sk[256]; size_t skn = 0;
+  skn += put_varint_field(sk + skn, 2, 99ULL);
+  /* build a port submessage that includes field 9 (wire-type 2, unknown) */
+  size_t ps = 0;
+  ps += put_varint_field(sub + ps, 1, 7ULL);      /* port 7 */
+  ps += put_varint_field(sub + ps, 3, 12345ULL);  /* rx_octets */
+  unsigned char pad_ld[5] = {0xaa, 0xbb, 0xcc, 0xdd, 0xee};
+  ps += put_ld_field(sub + ps, 9, pad_ld, sizeof(pad_ld)); /* unknown LD field */
+  ps += put_varint_field(sub + ps, 4, 999ULL);    /* rx_packets */
+  skn += put_ld_field(sk + skn, 3, sub, ps);
+  assert(portstats_decode(sk, skn, &skip) == 0);
+  assert(skip.ports[6].present && skip.ports[6].port == 7);
+  assert(skip.ports[6].rx_octets == 12345ULL);
+  assert(skip.ports[6].rx_packets == 999ULL);
+
   puts("portstats decode tests passed");
   return 0;
 }

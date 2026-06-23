@@ -9,8 +9,8 @@ static size_t read_varint(const unsigned char *b, size_t len, uint64_t *out) {
   size_t i = 0;
   int shift = 0;
   while (i < len) {
-    unsigned char byte = b[i];
     if (i >= 10) return 0;            /* varint too long */
+    unsigned char byte = b[i];
     result |= (uint64_t)(byte & 0x7f) << shift;
     i++;
     if ((byte & 0x80) == 0) { *out = result; return i; }
@@ -72,7 +72,7 @@ static int parse_port_submsg(const unsigned char *b, size_t len,
       if (!n) return -1;
       i += n;
       switch (field) {
-        case 1: port = (int)v; break;
+        case 1: port = (v > (uint64_t)PORTSTATS_MAX_PORTS) ? 0 : (int)v; break;
         case 3: rxo = v; break;
         case 4: rxp = v; break;
         case 13: txo = v; break;
