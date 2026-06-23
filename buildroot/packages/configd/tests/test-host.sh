@@ -64,6 +64,11 @@ cc -std=gnu11 -Wall -Wextra -Werror -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE 
   "$PKG/postmerkosctl.c" "$PKG/socket_io.c" $(pkg-config --libs json-c)
 "$HERE/test_management_health.py" "$HEALTH_OUT"
 
+SESSION_OUT=${TMPDIR:-/tmp}/configd-test-session
+cc -std=gnu11 -Wall -Wextra -Werror -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE \
+  -I"$PKG" -o "$SESSION_OUT" "$HERE/test_session.c" "$PKG/session.c"
+"$SESSION_OUT"
+
 BOOT_OUT=${TMPDIR:-/tmp}/configd-test-bootstrap
 cc -std=gnu11 -Wall -Wextra -Werror -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE \
   -I"$PKG" -I"$PKG/../postmerkos" -I"$PKG/../pd690xx" \
