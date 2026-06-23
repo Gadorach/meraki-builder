@@ -181,6 +181,39 @@ int main(void) {
     unsetenv("CONFIGD_PORT_PROTOBUF");
   }
 
+  /* portstats_write_file: render and re-read the v1 file */
+  {
+    /* enrich the earlier snapshot with oper/admin/speed */
+    snap.ports[0].oper = PORT_LINK_UP;
+    snap.ports[0].admin = PORT_LINK_UP;
+    snap.ports[0].speed_mbps = 1000;
+    snap.generated_unix = 1782230000L;
+    snap.timestamp = 123456L;
+    snap.ttl_seconds = 15L;
+    snap.discontinuity_ticks = 123400L;
+
+    char path[256];
+    snprintf(path, sizeof(path), "%s/portstats.v1",
+             getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");
+    setenv("CONFIGD_PORTSTATS_FILE", path, 1);
+    assert(portstats_write_file(&snap) == 0);
+
+    FILE *f = fopen(path, "r");
+    assert(f);
+    char content[4096];
+    size_t got = fread(content, 1, sizeof(content) - 1, f);
+    fclose(f);
+    content[got] = '\0';
+
+    assert(strstr(content, "# postmerkos-portstats v1"));
+    assert(strstr(content, "generated_unix=1782230000"));
+    assert(strstr(content, "ttl_seconds=15"));
+    assert(strstr(content, "# columns=ifindex name admin oper speed_mbps"));
+    /* port 1 row: ifindex name admin oper speed rx_octets ... */
+    assert(strstr(content, "1 port1 up up 1000 3613875132 28117844"));
+    unsetenv("CONFIGD_PORTSTATS_FILE");
+  }
+
   puts("portstats decode tests passed");
   return 0;
 }

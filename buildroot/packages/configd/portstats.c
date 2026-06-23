@@ -166,4 +166,51 @@ int portstats_read(struct portstats_snapshot *snap) {
   return rc;
 }
 
-/* portstats_write_file is implemented in a later task. */
+static const char *link_word(enum port_link_state s) {
+  return s == PORT_LINK_UP ? "up" : "down";
+}
+
+int portstats_write_file(const struct portstats_snapshot *snap) {
+  const char *path = getenv("CONFIGD_PORTSTATS_FILE");
+  if (!path || !*path) path = "/run/postmerkos/portstats.v1";
+
+  char tmp[512];
+  if (snprintf(tmp, sizeof(tmp), "%s.tmp", path) >= (int)sizeof(tmp)) return -1;
+
+  FILE *f = fopen(tmp, "w");
+  if (!f) return -1;
+
+  fprintf(f, "# postmerkos-portstats v1\n");
+  fprintf(f, "# generated_unix=%ld\n", snap->generated_unix);
+  fprintf(f, "# click_timestamp=%ld\n", snap->timestamp);
+  fprintf(f, "# valid=%d\n", snap->valid);
+  fprintf(f, "# ttl_seconds=%ld\n", snap->ttl_seconds);
+  fprintf(f, "# discontinuity_ticks=%ld\n", snap->discontinuity_ticks);
+  fprintf(f, "# columns=ifindex name admin oper speed_mbps rx_octets rx_packets "
+             "rx_errors rx_discards tx_octets tx_packets tx_errors tx_discards "
+             "rx_multicast rx_broadcast tx_multicast tx_broadcast\n");
+
+  for (int idx = 0; idx < PORTSTATS_MAX_PORTS; idx++) {
+    const struct port_counters *p = &snap->ports[idx];
+    if (!p->present) continue;
+    fprintf(f,
+            "%d port%d %s %s %d "
+            "%llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu\n",
+            p->port, p->port, link_word(p->admin), link_word(p->oper),
+            p->speed_mbps,
+            (unsigned long long)p->rx_octets, (unsigned long long)p->rx_packets,
+            (unsigned long long)p->rx_errors, (unsigned long long)p->rx_discards,
+            (unsigned long long)p->tx_octets, (unsigned long long)p->tx_packets,
+            (unsigned long long)p->tx_errors, (unsigned long long)p->tx_discards,
+            (unsigned long long)p->rx_multicast, (unsigned long long)p->rx_broadcast,
+            (unsigned long long)p->tx_multicast, (unsigned long long)p->tx_broadcast);
+  }
+
+  if (fflush(f) != 0) { fclose(f); unlink(tmp); return -1; }
+  int fd = fileno(f);
+  if (fd >= 0) fsync(fd);  /* best-effort; no-op on tmpfs */
+  if (fclose(f) != 0) { unlink(tmp); return -1; }
+
+  if (rename(tmp, path) != 0) { unlink(tmp); return -1; }
+  return 0;
+}
