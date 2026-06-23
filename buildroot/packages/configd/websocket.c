@@ -727,6 +727,37 @@ static int handle_request(struct lws *wsi, struct per_session_data *session,
     return 0;
   }
 
+  if (!strcmp(type, "auth_token")) {
+    struct json_object *data = request_data_object(message);
+    const char *token = object_string(data, "token");
+    char username[65] = {0};
+    long now = (long)time(NULL);
+    if (!token || session_lookup(token, now, username, sizeof(username)) != 0) {
+      queue_error(wsi, session, request_id, 401, "Unauthorized", "session expired");
+      return 0;
+    }
+    enum postmerkos_role role = role_for_username(username);
+    if (role == POSTMERKOS_ROLE_NONE) {
+      session_revoke_token(token);
+      queue_error(wsi, session, request_id, 403, "Forbidden",
+                  "account has no postmerkOS management role");
+      return 0;
+    }
+    session->authenticated = true;
+    session->role = role;
+    session->auth_failures = 0;
+    snprintf(session->username, sizeof(session->username), "%s", username);
+    snprintf(session->session_token, sizeof(session->session_token), "%s", token);
+    session->send_initial_status = true;
+    session->send_initial_config = true;
+    struct json_object *auth = role_identity_json(username);
+    if (role_has_capability(session->role, "users.manage"))
+      json_object_object_add(auth, "users", auth_list_users());
+    queue_response(wsi, session, "auth", auth, request_id);
+    json_object_put(auth);
+    return 0;
+  }
+
   if (!strcmp(type, "logout")) {
     session->authenticated = false;
     session->role = POSTMERKOS_ROLE_NONE;
