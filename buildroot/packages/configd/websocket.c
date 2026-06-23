@@ -759,6 +759,8 @@ static int handle_request(struct lws *wsi, struct per_session_data *session,
   }
 
   if (!strcmp(type, "logout")) {
+    session_revoke_token(session->session_token);
+    session->session_token[0] = '\0';
     session->authenticated = false;
     session->role = POSTMERKOS_ROLE_NONE;
     session->username[0] = '\0';
@@ -807,6 +809,7 @@ static int handle_request(struct lws *wsi, struct per_session_data *session,
     if (!require_capability(wsi, session, request_id, "users.manage")) return 0;
     struct json_object *data=request_data_object(message);const char *username=object_string(data,"username");char error[256]={0};
     if(auth_delete_user(username,error,sizeof(error))!=0){queue_bad_request(wsi,session,request_id,error);return 0;}
+    session_revoke_user(username);
     struct json_object *reply=json_object_new_object();json_object_object_add(reply,"message",json_object_new_string("Account deleted"));json_object_object_add(reply,"users",auth_list_users());queue_response(wsi,session,"users",reply,request_id);json_object_put(reply);return 0;
   }
   if (!strcmp(type, "user_role")) {
@@ -828,6 +831,7 @@ static int handle_request(struct lws *wsi, struct per_session_data *session,
       queue_error(wsi, session, request_id, 400, "Password update failed", error);
       return 0;
     }
+    session_revoke_user(target);
     struct json_object *ack = json_object_new_object();
     json_object_object_add(ack, "message",
                            json_object_new_string("Password updated"));

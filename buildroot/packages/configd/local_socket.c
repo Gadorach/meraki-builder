@@ -11,6 +11,7 @@
 #include "console_cli.h"
 #include "roles.h"
 #include "status.h"
+#include "session.h"
 #include "service_ops.h"
 #include "time_ops.h"
 #include "json_util.h"
@@ -234,7 +235,7 @@ static void handle_client(int fd) {
     if(!role_has_capability(role,"users.manage"))send_error(fd,403,"account management requires administrator access");else{char error[256]={0};if(auth_create_user(target,password,new_role,error,sizeof(error))!=0)send_error(fd,400,error);else{struct json_object *users=auth_list_users();send_json(fd,"users",users);json_object_put(users);}}
   } else if (!strcmp(type, "users.delete")) {
     struct json_object *data=request_data(request);const char *target=object_string(data,"username");
-    if(!role_has_capability(role,"users.manage"))send_error(fd,403,"account management requires administrator access");else{char error[256]={0};if(auth_delete_user(target,error,sizeof(error))!=0)send_error(fd,400,error);else{struct json_object *users=auth_list_users();send_json(fd,"users",users);json_object_put(users);}}
+    if(!role_has_capability(role,"users.manage"))send_error(fd,403,"account management requires administrator access");else{char error[256]={0};if(auth_delete_user(target,error,sizeof(error))!=0)send_error(fd,400,error);else{session_revoke_user(target);struct json_object *users=auth_list_users();send_json(fd,"users",users);json_object_put(users);}}
   } else if (!strcmp(type, "users.role")) {
     struct json_object *data=request_data(request);const char *target=object_string(data,"username"),*new_role=object_string(data,"role");
     if(!role_has_capability(role,"users.manage"))send_error(fd,403,"account management requires administrator access");else{char error[256]={0};if(auth_set_role(target,new_role,error,sizeof(error))!=0)send_error(fd,400,error);else{struct json_object *users=auth_list_users();send_json(fd,"users",users);json_object_put(users);}}
