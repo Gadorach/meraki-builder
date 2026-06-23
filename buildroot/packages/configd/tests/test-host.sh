@@ -101,3 +101,9 @@ cc -std=gnu11 -Wall -Wextra -Werror -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE 
   -I"$PKG" \
   -o "$OUT" "$HERE/test_metrics.c" "$PKG/metrics.c" "$PKG/portstats.c"
 "$OUT"
+
+OUT=${TMPDIR:-/tmp}/configd-test-metrics-server
+cc -std=gnu11 -Wall -Wextra -Werror -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE \
+  -I"$PKG" \
+  -o "$OUT" "$HERE/test_metrics_server.c" "$PKG/metrics.c" "$PKG/portstats.c"
+"$OUT"

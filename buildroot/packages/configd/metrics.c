@@ -144,6 +144,12 @@ int metrics_render(char *buf, size_t n,
 
 static int g_listen_fd = -1;
 
+static long now_monotonic_ms(void) {
+  struct timespec ts;
+  if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+  return ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
 int metrics_server_fd(void) { return g_listen_fd; }
 int metrics_server_running(void) { return g_listen_fd >= 0; }
 
@@ -166,7 +172,7 @@ int metrics_server_start(const char *bind_addr, int port) {
   if (listen(fd, 8) != 0) { close(fd); return -1; }
 
   int flags = fcntl(fd, F_GETFL, 0);
-  fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+  if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) { close(fd); return -1; }
 
   g_listen_fd = fd;
   return 0;
@@ -180,10 +186,12 @@ void metrics_server_stop(void) {
  * success with line NUL-terminated, -1 on error/timeout. */
 static int read_request_line(int cfd, char *line, size_t cap) {
   size_t used = 0;
-  long deadline_ms = METRICS_CONN_TIMEOUT_MS;
+  long deadline_ms = now_monotonic_ms() + METRICS_CONN_TIMEOUT_MS;
   while (used + 1 < cap) {
+    long remaining = deadline_ms - now_monotonic_ms();
+    if (remaining <= 0) return -1;
     struct pollfd pfd = { cfd, POLLIN, 0 };
-    int pr = poll(&pfd, 1, (int)deadline_ms);
+    int pr = poll(&pfd, 1, (int)remaining);
     if (pr <= 0) return -1;
     char c;
     ssize_t r = recv(cfd, &c, 1, 0);
@@ -215,6 +223,7 @@ void metrics_server_service(const struct portstats_snapshot *snap,
     if (read_request_line(cfd, line, sizeof(line)) == 0 &&
         strncmp(line, "GET /metrics", 12) == 0 &&
         (line[12] == ' ' || line[12] == '\0')) {
+      /* Safe because this server runs single-threaded in the main loop (no reentrancy). */
       static char body[METRICS_BODY_MAX];
       int blen = metrics_render(body, sizeof(body), snap, health);
       if (blen >= 0) {
