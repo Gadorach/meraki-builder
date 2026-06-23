@@ -1,8 +1,17 @@
 #include "metrics.h"
 
+#include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <poll.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <time.h>
+#include <unistd.h>
 
 struct sink {
   char *buf;
@@ -127,4 +136,105 @@ int metrics_render(char *buf, size_t n,
 
   if (s.overflow) return -1;
   return (int)s.len;
+}
+
+#define METRICS_BODY_MAX (256 * 1024)
+#define METRICS_REQLINE_MAX 2048
+#define METRICS_CONN_TIMEOUT_MS 2000
+
+static int g_listen_fd = -1;
+
+int metrics_server_fd(void) { return g_listen_fd; }
+int metrics_server_running(void) { return g_listen_fd >= 0; }
+
+int metrics_server_start(const char *bind_addr, int port) {
+  if (g_listen_fd >= 0) metrics_server_stop();
+
+  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) return -1;
+  int one = 1;
+  setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons((uint16_t)port);
+  if (!bind_addr || !*bind_addr) addr.sin_addr.s_addr = htonl(INADDR_ANY);
+  else if (inet_pton(AF_INET, bind_addr, &addr.sin_addr) != 1) { close(fd); return -1; }
+
+  if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) { close(fd); return -1; }
+  if (listen(fd, 8) != 0) { close(fd); return -1; }
+
+  int flags = fcntl(fd, F_GETFL, 0);
+  fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+  g_listen_fd = fd;
+  return 0;
+}
+
+void metrics_server_stop(void) {
+  if (g_listen_fd >= 0) { close(g_listen_fd); g_listen_fd = -1; }
+}
+
+/* Read the request line (up to CRLF) with a bounded timeout. Returns 0 on
+ * success with line NUL-terminated, -1 on error/timeout. */
+static int read_request_line(int cfd, char *line, size_t cap) {
+  size_t used = 0;
+  long deadline_ms = METRICS_CONN_TIMEOUT_MS;
+  while (used + 1 < cap) {
+    struct pollfd pfd = { cfd, POLLIN, 0 };
+    int pr = poll(&pfd, 1, (int)deadline_ms);
+    if (pr <= 0) return -1;
+    char c;
+    ssize_t r = recv(cfd, &c, 1, 0);
+    if (r <= 0) return -1;
+    if (c == '\n') { line[used] = '\0'; return 0; }
+    if (c != '\r') line[used++] = c;
+  }
+  return -1;
+}
+
+static void write_all(int cfd, const char *data, size_t len) {
+  size_t off = 0;
+  while (off < len) {
+    ssize_t w = send(cfd, data + off, len - off, MSG_NOSIGNAL);
+    if (w <= 0) { if (errno == EINTR) continue; break; }
+    off += (size_t)w;
+  }
+}
+
+void metrics_server_service(const struct portstats_snapshot *snap,
+                            const struct device_health *health) {
+  if (g_listen_fd < 0) return;
+  /* Drain pending connections (one render reused across all this cycle). */
+  for (;;) {
+    int cfd = accept(g_listen_fd, NULL, NULL);
+    if (cfd < 0) break;  /* EAGAIN/EWOULDBLOCK: no more pending */
+
+    char line[METRICS_REQLINE_MAX];
+    if (read_request_line(cfd, line, sizeof(line)) == 0 &&
+        strncmp(line, "GET /metrics", 12) == 0 &&
+        (line[12] == ' ' || line[12] == '\0')) {
+      static char body[METRICS_BODY_MAX];
+      int blen = metrics_render(body, sizeof(body), snap, health);
+      if (blen >= 0) {
+        char head[256];
+        int hn = snprintf(head, sizeof(head),
+            "HTTP/1.0 200 OK\r\n"
+            "Content-Type: text/plain; version=0.0.4\r\n"
+            "Content-Length: %d\r\n"
+            "Connection: close\r\n\r\n", blen);
+        write_all(cfd, head, (size_t)hn);
+        write_all(cfd, body, (size_t)blen);
+      } else {
+        const char *e = "HTTP/1.0 500 Internal Server Error\r\n"
+                        "Connection: close\r\n\r\n";
+        write_all(cfd, e, strlen(e));
+      }
+    } else {
+      const char *nf = "HTTP/1.0 404 Not Found\r\nConnection: close\r\n\r\n";
+      write_all(cfd, nf, strlen(nf));
+    }
+    close(cfd);
+  }
 }
