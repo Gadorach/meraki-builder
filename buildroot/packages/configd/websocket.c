@@ -10,6 +10,7 @@
 #include "result.h"
 #include "roles.h"
 #include "release.h"
+#include "session.h"
 #include "status.h"
 #include "system_ops.h"
 #include "service_ops.h"
@@ -47,6 +48,7 @@ struct per_session_data {
   bool authenticated;
   enum postmerkos_role role;
   char username[65];
+  char session_token[65];
   unsigned int auth_failures;
   bool send_initial_status;
   bool send_initial_config;
@@ -707,6 +709,17 @@ static int handle_request(struct lws *wsi, struct per_session_data *session,
     session->send_initial_status = true;
     session->send_initial_config = true;
     struct json_object *auth = role_identity_json(username);
+    struct json_object *remember_obj = NULL;
+    bool remember = data && json_object_object_get_ex(data, "remember", &remember_obj) &&
+                    json_object_get_boolean(remember_obj);
+    long now = (long)time(NULL);
+    long ttl = remember ? SESSION_TTL_REMEMBER : SESSION_TTL_DEFAULT;
+    const char *token = session_create(username, ttl, now);
+    if (token) {
+      snprintf(session->session_token, sizeof(session->session_token), "%s", token);
+      json_object_object_add(auth, "token", json_object_new_string(token));
+      json_object_object_add(auth, "expires_at", json_object_new_int64((int64_t)(now + ttl)));
+    }
     if (role_has_capability(session->role, "users.manage"))
       json_object_object_add(auth, "users", auth_list_users());
     queue_response(wsi, session, "auth", auth, request_id);
