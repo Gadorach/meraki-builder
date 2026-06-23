@@ -13,6 +13,7 @@
 #include "status.h"
 #include "system_ops.h"
 #include "service_ops.h"
+#include "telemetry.h"
 #include "time_ops.h"
 #include "validation.h"
 
@@ -1155,6 +1156,9 @@ static int handle_request(struct lws *wsi, struct per_session_data *session,
   json_object_put(ack);
   apply_result_cleanup(&result);
   config_file_mtime(&config_mtime_ns);
+  const struct network_runtime *net_rt = network_manager_runtime();
+  const char *mgmt_addr = (net_rt && net_rt->applied.address[0]) ? net_rt->applied.address : NULL;
+  telemetry_apply(saved, mgmt_addr);
   refresh_config_cache(saved, true);
   refresh_status_cache(true);
   json_object_put(saved);
