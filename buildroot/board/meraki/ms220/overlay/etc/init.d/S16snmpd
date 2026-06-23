@@ -24,7 +24,7 @@
 # listen address here; the daemon binds 0.0.0.0:161. This is a known
 # limitation of the packaged version (spec 8.8 wants mgmt-only bind).
 #
-DAEMON=${SNMPD_DAEMON:-/usr/sbin/mini_snmpd}
+DAEMON=${SNMPD_DAEMON:-/usr/sbin/mini-snmpd}
 ENV_FILE=${CONFIGD_SNMPD_ENV:-/run/postmerkos/snmpd.env}
 CONFIG=${CONFIGD_CONFIG:-/etc/switch.json}
 PIDFILE=${SNMPD_PIDFILE:-/run/mini_snmpd.pid}

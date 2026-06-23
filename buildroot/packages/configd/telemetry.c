@@ -141,14 +141,18 @@ void telemetry_apply(struct json_object *config, const char *bind_addr) {
   int port = int_member(prom, "port", TELEMETRY_PROM_DEFAULT_PORT);
 
   if (enabled) {
-    /* restart on (re)apply to pick up a port change */
+    /* restart on (re)apply to pick up a port change.
+     * Bind 0.0.0.0: the device's L3 management IP lives in the Click/brain
+     * datapath, not on a Linux interface, so it is not bindable here (same
+     * reason the websocket and mini_snmpd bind all interfaces). bind_addr is
+     * retained only for the informational SNMP_BIND in the snmpd env. */
     metrics_server_stop();
-    if (metrics_server_start(bind_addr, port) != 0)
-      fprintf(stderr, "%s telemetry: metrics listener bind failed on %s:%d\n",
-              get_time(), bind_addr ? bind_addr : "*", port);
+    if (metrics_server_start(NULL, port) != 0)
+      fprintf(stderr, "%s telemetry: metrics listener bind failed on 0.0.0.0:%d\n",
+              get_time(), port);
     else
-      fprintf(stderr, "%s telemetry: metrics listener started on %s:%d\n",
-              get_time(), bind_addr ? bind_addr : "*", port);
+      fprintf(stderr, "%s telemetry: metrics listener started on 0.0.0.0:%d\n",
+              get_time(), port);
   } else if (metrics_server_running()) {
     metrics_server_stop();
     fprintf(stderr, "%s telemetry: metrics listener stopped\n", get_time());
