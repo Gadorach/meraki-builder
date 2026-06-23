@@ -2,6 +2,7 @@
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* --- minimal protobuf encoder used only to build test fixtures --- */
@@ -155,6 +156,30 @@ int main(void) {
   assert(skip.ports[6].present && skip.ports[6].port == 7);
   assert(skip.ports[6].rx_octets == 12345ULL);
   assert(skip.ports[6].rx_packets == 999ULL);
+
+  /* portstats_read: write a fixture file, point env at it, decode it */
+  {
+    char path[256];
+    snprintf(path, sizeof(path), "%s/portstats-fixture.bin",
+             getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");
+    FILE *f = fopen(path, "wb");
+    assert(f);
+    assert(fwrite(msg, 1, m, f) == m);
+    fclose(f);
+    setenv("CONFIGD_PORT_PROTOBUF", path, 1);
+
+    struct portstats_snapshot rd;
+    assert(portstats_read(&rd) == 0);
+    assert(rd.valid == 1);
+    assert(rd.ports[0].rx_octets == 3613875132ULL);
+
+    /* missing file -> invalid, no crash */
+    setenv("CONFIGD_PORT_PROTOBUF", "/nonexistent/path/xyz", 1);
+    struct portstats_snapshot miss;
+    assert(portstats_read(&miss) != 0);
+    assert(miss.valid == 0);
+    unsetenv("CONFIGD_PORT_PROTOBUF");
+  }
 
   puts("portstats decode tests passed");
   return 0;

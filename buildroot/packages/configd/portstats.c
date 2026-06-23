@@ -1,6 +1,12 @@
 #include "portstats.h"
 
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <unistd.h>
 
 /* Read a base-128 varint. Returns bytes consumed, or 0 on error
  * (truncated, or more than 10 continuation bytes). */
@@ -128,4 +134,36 @@ int portstats_decode(const unsigned char *buf, size_t len,
   return 0;
 }
 
-/* portstats_read and portstats_write_file are implemented in later tasks. */
+#define PORTSTATS_MAX_BYTES (256 * 1024)
+
+int portstats_read(struct portstats_snapshot *snap) {
+  memset(snap, 0, sizeof(*snap));
+  const char *path = getenv("CONFIGD_PORT_PROTOBUF");
+  if (!path || !*path) path = "/click/switch_port_table/switch_port_protobuf";
+
+  int fd = open(path, O_RDONLY);
+  if (fd < 0) return -1;
+
+  unsigned char *buf = malloc(PORTSTATS_MAX_BYTES);
+  if (!buf) { close(fd); return -1; }
+
+  size_t total = 0;
+  for (;;) {
+    if (total >= PORTSTATS_MAX_BYTES) { free(buf); close(fd); return -1; }
+    ssize_t r = read(fd, buf + total, PORTSTATS_MAX_BYTES - total);
+    if (r < 0) {
+      if (errno == EINTR) continue;
+      free(buf); close(fd); return -1;
+    }
+    if (r == 0) break;
+    total += (size_t)r;
+  }
+  close(fd);
+
+  int rc = portstats_decode(buf, total, snap);
+  free(buf);
+  if (rc == 0) snap->generated_unix = (long)time(NULL);
+  return rc;
+}
+
+/* portstats_write_file is implemented in a later task. */
