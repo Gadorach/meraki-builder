@@ -15,6 +15,11 @@ char meraki_mac[18] = "00:11:22:33:44:55";
 struct hardware_info hardware;
 struct pd690xx_cfg pd690xx;
 
+/* link stub: telemetry_apply (which calls service_action) is not exercised by these unit tests */
+int service_action(const char *service, const char *action, char *error, size_t error_size) {
+  (void)service; (void)action; (void)error; (void)error_size; return 0;
+}
+
 static struct json_object *parse(const char *t) {
   struct json_object *v = json_tokener_parse(t);
   assert(v);

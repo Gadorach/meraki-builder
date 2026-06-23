@@ -3,6 +3,7 @@
 #include "metrics.h"
 #include "portstats.h"
 #include "hardware.h"
+#include "service_ops.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -151,6 +152,18 @@ void telemetry_apply(struct json_object *config, const char *bind_addr) {
   } else if (metrics_server_running()) {
     metrics_server_stop();
     fprintf(stderr, "%s telemetry: metrics listener stopped\n", get_time());
+  }
+
+  /* --- SNMP --- */
+  struct json_object *snmp = member(t, "snmp");
+  bool snmp_enabled = bool_member(snmp, "enabled", false);
+  char serr[128] = {0};
+  if (snmp_enabled) {
+    telemetry_write_snmpd_env(config, bind_addr);
+    if (service_action("snmp", "restart", serr, sizeof(serr)) != 0)
+      fprintf(stderr, "%s telemetry: snmp start failed: %s\n", get_time(), serr);
+  } else {
+    service_action("snmp", "stop", serr, sizeof(serr));
   }
 }
 
