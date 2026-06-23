@@ -89,3 +89,9 @@ grep -q '"message":"Network bootstrap complete"' "$BOOT_TMP/result.json"
 [ ! -s "$BOOT_TMP/err" ]
 rm -rf "$BOOT_TMP"
 printf '%s\n' 'configd condensed bootstrap output test passed'
+
+OUT=${TMPDIR:-/tmp}/configd-test-portstats
+cc -std=gnu11 -Wall -Wextra -Werror -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE \
+  -I"$PKG" \
+  -o "$OUT" "$HERE/test_portstats.c" "$PKG/portstats.c"
+"$OUT"
