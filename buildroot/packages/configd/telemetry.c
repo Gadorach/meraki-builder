@@ -226,8 +226,11 @@ static enum port_link_state phy_admin_state(unsigned int port) {
 }
 
 static void enrich_port_status(struct portstats_snapshot *snap) {
+  /* Use the SAME handler status.c reads for link state: PORTS_FILE
+   * (/click/switch_port_table/dump_pports), field 2 = established, field 3 =
+   * speed Mbps. dump_lports is STP state, not link state — wrong source. */
   const char *ports_path = getenv("CONFIGD_PORTS_FILE");
-  if (!ports_path || !*ports_path) ports_path = "/click/switch_port_table/dump_lports";
+  if (!ports_path || !*ports_path) ports_path = PORTS_FILE;
   FILE *f = fopen(ports_path, "r");
   if (!f) return;
   char line[512];
