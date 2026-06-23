@@ -1,0 +1,383 @@
+From: postmerkOS <noreply@postmerkos>
+Subject: [PATCH] IF-MIB switch-port counters sourced from portstats.v1
+
+mini_snmpd 1.6 patch for postmerkOS port telemetry (Plan B / spec section 8).
+
+Builds the IF-MIB ifTable/ifXTable from two sources, merged:
+
+  * Switch ports: parsed from /run/postmerkos/portstats.v1 (written
+    atomically each poll by configd).  Overridable via the environment
+    variable MINI_SNMPD_PORTSTATS for off-device testing.
+  * Management interface: the existing /proc/net/dev / getifaddrs backend,
+    selected with the -i CLI option, but forced to ifIndex 1000 so it never
+    collides with switch-port ifIndexes.
+
+ifIndex scheme (spec section 8.3): the switch-port ifIndex is the port
+number from the file and is NOT compacted -- present ports 1,3,5 keep
+ifIndex 1,3,5.  The management interface is ifIndex 1000.
+
+Value mapping (spec section 8):
+  ifDescr/ifName            = port<N>
+  ifHCInOctets/ifHCOutOctets= rx_octets / tx_octets   (Counter64)
+  ifInOctets/ifOutOctets    = low 32 bits of the above (existing % UINT_MAX)
+  ifHighSpeed               = speed_mbps
+  ifSpeed                   = speed_mbps * 1e6, saturated at 0xFFFFFFFF
+  ifOperStatus              = oper  column (up=1/down=2)
+  ifAdminStatus             = admin column (up=1/down=2), now tracked
+                              independently of oper status
+  ifInUcastPkts/Out, errors, discards = left 0 (not pinned, spec 8.5/8.6)
+
+Staleness (spec section 7.5): if portstats.v1 is missing, marked invalid,
+malformed, or older than generated_unix + ttl_seconds, the parser returns
+-1.  At startup that means no switch-port rows are created at all; at
+runtime it means the switch-port counters are zeroed and ifOperStatus goes
+down -- stale counters are never served as current, and the daemon never
+crashes.  The switch-port row *set* is fixed at startup (mini_snmpd builds
+the MIB tree once), so ports must be present in portstats.v1 when the
+daemon starts to appear in the table.
+
+Implementation notes / known limitations of this mini_snmpd version:
+  * MAX_NR_INTERFACES is bumped 8 -> 64 to fit switch ports + mgmt.
+  * No bind-to-address option exists (only -I/--listen bind-to-device);
+    mgmt-only bind by IP address is therefore not available here.
+  * ifCounterDiscontinuityTime stays 0 (upstream leaves it unsupported).
+
+Files: mini-snmpd.h, linux.c, mib.c, mini-snmpd.c
+---
+--- a/mini-snmpd.h	2020-02-23 08:58:41.000000000 +0100
++++ b/mini-snmpd.h	2026-06-23 14:37:02.669874911 +0200
+@@ -38,7 +38,12 @@
+ #define MAX_NR_OIDS                                     20
+ #define MAX_NR_SUBIDS                                   20
+ #define MAX_NR_DISKS                                    4
+-#define MAX_NR_INTERFACES                               8
++/*
++ * postmerkOS: bumped from 8 so the switch-port rows sourced from
++ * /run/postmerkos/portstats.v1 (plus the management interface at
++ * ifIndex 1000) all fit in the per-interface arrays.
++ */
++#define MAX_NR_INTERFACES                              64
+ #define MAX_NR_VALUES                                   2048
+ 
+ #define MAX_PACKET_SIZE                                 2048
+@@ -220,6 +225,15 @@
+ 	unsigned int if_speed[MAX_NR_INTERFACES];
+ 	unsigned int ifindex[MAX_NR_INTERFACES];
+ 	unsigned int status[MAX_NR_INTERFACES];
++	/* postmerkOS: administrative status, separate from oper status.
++	 * 1=up, 2=down. For /proc/net/dev mgmt interfaces this mirrors
++	 * the IFF_UP-derived oper status; for switch ports it carries the
++	 * admin column from portstats.v1. */
++	unsigned int admin_status[MAX_NR_INTERFACES];
++	/* postmerkOS: link speed in Mbps (un-truncated). if_speed[] above
++	 * is bps and saturates a 32-bit unsigned int for >4Gbps links, so
++	 * ifHighSpeed (Mbps) is derived from this field instead. */
++	unsigned int if_speed_mbps[MAX_NR_INTERFACES];
+ 	unsigned int lastchange[MAX_NR_INTERFACES];
+ 	unsigned int stats[MAX_NR_INTERFACES];		/* Sentinel for backends */
+ 	long long rx_bytes[MAX_NR_INTERFACES];
+@@ -360,6 +374,10 @@
+ void         get_udpinfo        (udpinfo_t *udpinfo);
+ void         get_diskinfo       (diskinfo_t *diskinfo);
+ void         get_netinfo        (netinfo_t *netinfo);
++/* postmerkOS: append switch-port interfaces (port<N>) discovered in
++ * /run/postmerkos/portstats.v1 to g_interface_list before mib_build().
++ * Safe to call when the file is missing (adds nothing). */
++void         ps_init_interfaces (void);
+ #ifdef CONFIG_ENABLE_DEMO
+ void         get_demoinfo       (demoinfo_t *demoinfo);
+ #endif
+--- a/linux.c	2020-02-23 08:58:41.000000000 +0100
++++ b/linux.c	2026-06-23 14:37:02.669874911 +0200
+@@ -36,10 +36,222 @@
+ #include <ctype.h>
+ #include <time.h>
+ #include <math.h>
++#include <limits.h>		/* postmerkOS: UINT_MAX for speed saturation */
+ 
+ #include "mini-snmpd.h"
+ 
+ 
++/*
++ * ==========================================================================
++ * postmerkOS: IF-MIB switch-port counters sourced from a stats file
++ * ==========================================================================
++ *
++ * configd writes /run/postmerkos/portstats.v1 atomically each poll.  This
++ * backend overlays those switch-port rows onto mini_snmpd's per-interface
++ * tables, alongside the management interface(s) read from /proc/net/dev.
++ *
++ * Indexing scheme:
++ *   - Management interface(s) come from the -i CLI list, occupying the
++ *     leading slots of g_interface_list[].  The FIRST management interface
++ *     is forced to ifIndex 1000 so it never collides with switch ports.
++ *   - Switch ports (port<N>) are appended to g_interface_list[] by
++ *     ps_init_interfaces() at startup; their SNMP ifIndex value is the port
++ *     number from the file (NOT compacted: present ports 1,3,5 -> 1,3,5).
++ *
++ * Staleness: if the file is missing, marked invalid, malformed, or older
++ * than generated_unix + ttl_seconds, ps_read() returns -1 and the overlay
++ * zeroes the switch-port counters (oper status down) rather than serving
++ * stale counters as current.  The row set itself is fixed at startup.
++ *
++ * Path is overridable via $MINI_SNMPD_PORTSTATS for off-device testing.
++ *
++ * Known limitations (this mini_snmpd 1.6):
++ *   - No bind-to-address option (only -I bind-to-device); mgmt-only bind by
++ *     address is not available.
++ *   - ifInUcastPkts/ifOutUcastPkts left 0 (total packets != unicast).
++ *   - ifInErrors/ifOutErrors/discards left 0 (breakdown not pinned).
++ *   - ifCounterDiscontinuityTime is 0 (upstream leaves it unsupported).
++ */
++
++#define PS_DEFAULT_PATH "/run/postmerkos/portstats.v1"
++
++struct ps_port {
++	int          ifindex;
++	char         name[16];
++	int          admin_up;
++	int          oper_up;
++	unsigned int speed_mbps;
++	long long    rx_octets, rx_packets, tx_octets, tx_packets;
++};
++
++static const char *ps_path(void)
++{
++	const char *p = getenv("MINI_SNMPD_PORTSTATS");
++
++	if (p && *p)
++		return p;
++	return PS_DEFAULT_PATH;
++}
++
++/*
++ * Parse portstats.v1 into out[0..max-1].  Returns the number of ports
++ * parsed (>= 0), or -1 if the file is missing / invalid / stale / has no
++ * usable rows.  Deterministic and self-contained (also unit-tested
++ * off-device in ps_read_test.c).
++ */
++static int ps_read(const char *path, struct ps_port *out, int max)
++{
++	FILE *f;
++	char line[1024];
++	long generated = 0, ttl = 0;
++	int valid = 0, n = 0;
++
++	f = fopen(path, "r");
++	if (!f)
++		return -1;
++
++	while (fgets(line, sizeof(line), f)) {
++		if (line[0] == '#') {
++			sscanf(line, "# generated_unix=%ld", &generated);
++			sscanf(line, "# ttl_seconds=%ld", &ttl);
++			sscanf(line, "# valid=%d", &valid);
++			continue;
++		}
++		if (n >= max)
++			break;
++
++		{
++			struct ps_port p;
++			char admin[8], oper[8];
++			int got;
++
++			memset(&p, 0, sizeof(p));
++			got = sscanf(line,
++				     "%d %15s %7s %7s %u %lld %lld %*u %*u %lld %lld",
++				     &p.ifindex, p.name, admin, oper, &p.speed_mbps,
++				     &p.rx_octets, &p.rx_packets,
++				     &p.tx_octets, &p.tx_packets);
++			if (got < 9)
++				continue;	/* malformed row: skip */
++
++			p.admin_up = strcmp(admin, "up") == 0;
++			p.oper_up  = strcmp(oper, "up") == 0;
++			out[n++] = p;
++		}
++	}
++	fclose(f);
++
++	if (!valid)
++		return -1;
++	if (ttl > 0 && (long)time(NULL) > generated + ttl)
++		return -1;	/* stale */
++	if (n == 0)
++		return -1;	/* no usable rows */
++
++	return n;
++}
++
++/*
++ * Append switch-port interface names to g_interface_list[] so mib_build()
++ * allocates rows for them.  Called once from main() before mib_build().
++ */
++void ps_init_interfaces(void)
++{
++	struct ps_port ports[MAX_NR_INTERFACES];
++	int n, i;
++
++	n = ps_read(ps_path(), ports, MAX_NR_INTERFACES);
++	if (n <= 0)
++		return;
++
++	for (i = 0; i < n; i++) {
++		char *name;
++
++		if (g_interface_list_length >= MAX_NR_INTERFACES)
++			break;
++		name = strdup(ports[i].name);
++		if (!name)
++			break;
++		g_interface_list[g_interface_list_length++] = name;
++	}
++}
++
++/*
++ * Overlay switch-port counters onto netinfo for the slots that correspond
++ * to port<N> interfaces.  Management interfaces are left untouched except
++ * that the first one is forced to ifIndex 1000.  On a stale/missing file
++ * the switch-port slots are zeroed (oper down) so no stale data is served.
++ */
++static void ps_overlay(netinfo_t *netinfo)
++{
++	struct ps_port ports[MAX_NR_INTERFACES];
++	int n, mgmt_done = 0;
++	size_t i;
++
++	n = ps_read(ps_path(), ports, MAX_NR_INTERFACES);
++
++	for (i = 0; i < g_interface_list_length; i++) {
++		const char *ifname = g_interface_list[i];
++		int matched = 0;
++		int j;
++
++		/* Switch ports are the names we appended: "port<N>". Match by
++		 * name against the freshly read rows. */
++		if (n > 0) {
++			for (j = 0; j < n; j++) {
++				if (strcmp(ifname, ports[j].name))
++					continue;
++
++				netinfo->ifindex[i]       = ports[j].ifindex;
++				netinfo->if_type[i]       = 6; /* ethernetCsmacd */
++				netinfo->if_mtu[i]        = 1500;
++				netinfo->if_speed_mbps[i] = ports[j].speed_mbps;
++				/* bps, saturated into the 32-bit unsigned field */
++				if (ports[j].speed_mbps >= (UINT_MAX / 1000000u))
++					netinfo->if_speed[i] = UINT_MAX;
++				else
++					netinfo->if_speed[i] = ports[j].speed_mbps * 1000000u;
++				netinfo->status[i]        = ports[j].oper_up ? 1 : 2;
++				netinfo->admin_status[i]  = ports[j].admin_up ? 1 : 2;
++				netinfo->rx_bytes[i]      = ports[j].rx_octets;
++				netinfo->rx_packets[i]    = ports[j].rx_packets;
++				netinfo->tx_bytes[i]      = ports[j].tx_octets;
++				netinfo->tx_packets[i]    = ports[j].tx_packets;
++				/* Unicast/error/discard breakdown not pinned -> 0. */
++				netinfo->stats[i]         = 1;
++				matched = 1;
++				break;
++			}
++		}
++
++		if (!matched && strncmp(ifname, "port", 4) == 0) {
++			/* A switch port with no fresh data (stale/missing file or
++			 * port not present this poll): zero counters, oper down,
++			 * never serve stale values as current. */
++			netinfo->ifindex[i]       = atoi(ifname + 4);
++			netinfo->if_type[i]       = 6;
++			netinfo->if_mtu[i]        = 1500;
++			netinfo->if_speed[i]      = 0;
++			netinfo->if_speed_mbps[i] = 0;
++			netinfo->status[i]        = 2; /* down */
++			netinfo->admin_status[i]  = 2;
++			netinfo->rx_bytes[i]      = 0;
++			netinfo->rx_packets[i]    = 0;
++			netinfo->tx_bytes[i]      = 0;
++			netinfo->tx_packets[i]    = 0;
++			netinfo->stats[i]         = 1;
++			continue;
++		}
++
++		if (!matched && !mgmt_done) {
++			/* First management interface -> ifIndex 1000. */
++			netinfo->ifindex[i] = 1000;
++			mgmt_done = 1;
++		}
++	}
++}
++
++
+ /* We need the uptime in 1/100 seconds, so we can't use sysinfo() */
+ unsigned int get_process_uptime(void)
+ {
+@@ -260,6 +472,9 @@
+ 			else
+ 				netinfo->status[i] = 2;
+ 
++			/* postmerkOS: admin status mirrors IFF_UP for mgmt ifaces */
++			netinfo->admin_status[i] = (ifa->ifa_flags & IFF_UP) ? 1 : 2;
++
+ 			sll = (struct sockaddr_ll *)ifa->ifa_addr;
+ 			memcpy(netinfo->mac_addr[i], sll->sll_addr, sizeof(netinfo->mac_addr[i]));
+ 
+@@ -281,6 +496,7 @@
+ 
+ 			if (-1 == read_file_value(&netinfo->if_speed[i], "/sys/class/net/%s/speed", g_interface_list[i]))
+ 				netinfo->if_speed[i] = 1000; /* Fallback */
++			netinfo->if_speed_mbps[i] = netinfo->if_speed[i]; /* postmerkOS: Mbps */
+ 			netinfo->if_speed[i] *= 1000000;     /* to bps */
+ 
+ 			netinfo->ifindex[i] = if_nametoindex(ifa->ifa_name);
+@@ -293,6 +509,10 @@
+ 
+ 	parse_file("/proc/net/dev", fields, NELEMS(fields), 0);
+ 	freeifaddrs(ifap);
++
++	/* postmerkOS: overlay switch-port counters from portstats.v1 and
++	 * force the management interface to ifIndex 1000. */
++	ps_overlay(netinfo);
+ }
+ 
+ #endif /* __linux__ */
+--- a/mib.c	2020-02-23 08:58:41.000000000 +0100
++++ b/mib.c	2026-06-23 14:37:02.669874911 +0200
+@@ -1120,8 +1120,10 @@
+ 			}
+ 
+ 			for (i = 0; i < g_interface_list_length; i++) {
+-				unsigned int status = netinfo.status[i];
+-				unsigned int updown = status != 2 ? 1 : 2;
++				/* postmerkOS: ifAdminStatus from the admin column
++				 * (switch ports) / IFF_UP (mgmt), independent of
++				 * the oper status below. */
++				unsigned int updown = netinfo.admin_status[i] != 2 ? 1 : 2;
+ 
+ 				if (update_int(&m_if_2_oid, 7, i + 1, &pos, updown) == -1)
+ 					return -1;
+@@ -1322,7 +1324,10 @@
+ 			}
+ 
+ 			for (i = 0; i < g_interface_list_length; i++) {
+-				if (update_gge(&m_ifxtable_oid, 15, i + 1, &pos, netinfo.if_speed[i] / 1000000) == -1)
++				/* postmerkOS: ifHighSpeed is Mbps; use the
++				 * un-truncated field so >4Gbps links report
++				 * correctly even though ifSpeed (bps) saturates. */
++				if (update_gge(&m_ifxtable_oid, 15, i + 1, &pos, netinfo.if_speed_mbps[i]) == -1)
+ 					return -1;
+ 			}
+ 
+--- a/mini-snmpd.c	2020-02-23 08:58:41.000000000 +0100
++++ b/mini-snmpd.c	2026-06-23 14:37:02.669874911 +0200
+@@ -544,6 +544,10 @@
+ 		tv_sleep.tv_usec = (g_timeout % 100) * 10000;
+ 	}
+ 
++	/* postmerkOS: append switch-port interfaces from portstats.v1 so the
++	 * IF-MIB tables include them (mgmt iface stays at ifIndex 1000). */
++	ps_init_interfaces();
++
+ 	/* Build the MIB and execute the first MIB update to get actual values */
+ 	if (mib_build() == -1)
+ 		exit(EXIT_SYSCALL);
