@@ -28,4 +28,8 @@ int telemetry_interval_seconds(void);
  * (optional optimization; telemetry_tick() also services it). */
 int telemetry_server_fd(void);
 
+/* Render /run/postmerkos/snmpd.env (or $CONFIGD_SNMPD_ENV) from telemetry.snmp.
+ * bind_addr is the management IPv4 (may be NULL/empty). Returns 0 / -1. */
+int telemetry_write_snmpd_env(struct json_object *config, const char *bind_addr);
+
 #endif

@@ -162,6 +162,42 @@ int telemetry_interval_seconds(void) {
 
 int telemetry_server_fd(void) { return metrics_server_fd(); }
 
+/* ---- snmpd.env writer ---- */
+
+static void sq(FILE *f, const char *key, const char *val) {
+  /* single-quote, turning ' into '\'' */
+  fprintf(f, "%s='", key);
+  for (const char *p = val ? val : ""; *p; p++) {
+    if (*p == '\'') fputs("'\\''", f);
+    else fputc(*p, f);
+  }
+  fputs("'\n", f);
+}
+
+int telemetry_write_snmpd_env(struct json_object *config, const char *bind_addr) {
+  struct json_object *snmp = member(member(config, "telemetry"), "snmp");
+  const char *community = str_member(snmp, "community", "");
+  const char *location = str_member(snmp, "location", "");
+  const char *contact = str_member(snmp, "contact", "");
+
+  const char *path = getenv("CONFIGD_SNMPD_ENV");
+  if (!path || !*path) path = "/run/postmerkos/snmpd.env";
+  char tmp[512];
+  if (snprintf(tmp, sizeof(tmp), "%s.tmp", path) >= (int)sizeof(tmp)) return -1;
+
+  FILE *f = fopen(tmp, "w");
+  if (!f) return -1;
+  sq(f, "SNMP_COMMUNITY", community);
+  sq(f, "SNMP_LOCATION", location);
+  sq(f, "SNMP_CONTACT", contact);
+  sq(f, "SNMP_BIND", bind_addr ? bind_addr : "");
+  if (fflush(f) != 0) { fclose(f); unlink(tmp); return -1; }
+  int fd = fileno(f); if (fd >= 0) fsync(fd);
+  if (fclose(f) != 0) { unlink(tmp); return -1; }
+  if (rename(tmp, path) != 0) { unlink(tmp); return -1; }
+  return 0;
+}
+
 /* ---- telemetry_tick implementation ---- */
 
 static enum port_link_state phy_admin_state(unsigned int port) {

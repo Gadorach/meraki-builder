@@ -70,6 +70,28 @@ int main(void) {
   assert(telemetry_validate(unknown, err, sizeof(err)) == -EINVAL);
   json_object_put(unknown);
 
+  /* snmpd.env render */
+  {
+    char path[256];
+    snprintf(path, sizeof(path), "%s/snmpd.env",
+             getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");
+    setenv("CONFIGD_SNMPD_ENV", path, 1);
+    struct json_object *cfg = parse(
+      "{\"telemetry\":{\"snmp\":{\"enabled\":true,\"community\":\"s3cret\","
+      "\"location\":\"rack 4\",\"contact\":\"net@ex\"}}}");
+    assert(telemetry_write_snmpd_env(cfg, "192.0.2.10") == 0);
+    json_object_put(cfg);
+
+    FILE *f = fopen(path, "r");
+    assert(f);
+    char c[1024]; size_t n = fread(c, 1, sizeof(c) - 1, f); fclose(f); c[n] = '\0';
+    assert(strstr(c, "SNMP_COMMUNITY='s3cret'"));
+    assert(strstr(c, "SNMP_LOCATION='rack 4'"));
+    assert(strstr(c, "SNMP_CONTACT='net@ex'"));
+    assert(strstr(c, "SNMP_BIND='192.0.2.10'"));
+    unsetenv("CONFIGD_SNMPD_ENV");
+  }
+
   puts("telemetry validation tests passed");
   return 0;
 }
