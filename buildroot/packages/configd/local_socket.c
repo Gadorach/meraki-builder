@@ -6,6 +6,7 @@
 #include "config_apply.h"
 #include "configd.h"
 #include "result.h"
+#include "network.h"
 #include "port_clone.h"
 #include "validation.h"
 #include "console_cli.h"
@@ -13,6 +14,7 @@
 #include "status.h"
 #include "session.h"
 #include "service_ops.h"
+#include "telemetry.h"
 #include "time_ops.h"
 #include "json_util.h"
 #include "socket_io.h"
@@ -97,6 +99,11 @@ static int save_delta_reply(int fd, struct json_object *delta) {
                                              error, sizeof(error));
   if (rc != 0) send_error(fd, 400, error[0] ? error : "configuration rejected");
   else {
+    if (saved) {
+      const struct network_runtime *net_rt = network_manager_runtime();
+      const char *mgmt_addr = (net_rt && net_rt->applied.address[0]) ? net_rt->applied.address : NULL;
+      telemetry_apply(saved, mgmt_addr);
+    }
     struct json_object *ack = apply_result_json(&result, "Configuration accepted");
     send_json(fd, "ack", ack);
     json_object_put(ack);

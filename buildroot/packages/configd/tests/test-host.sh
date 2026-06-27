@@ -78,7 +78,8 @@ cc -std=gnu11 -Wall -Wextra -Werror -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE 
   "$PKG/hardware.c" "$PKG/network.c" "$PKG/result.c" "$PKG/validation.c" \
   "$PKG/console_cli.c" "$PKG/release.c" "$PKG/roles.c" "$PKG/local_socket.c" \
   "$PKG/socket_io.c" "$PKG/service_ops.c" "$PKG/time_ops.c" "$PKG/port_clone.c" \
-  "$PKG/compatibility.c" "$PKG/auth.c" "$PKG/websocket_disabled.c" \
+  "$PKG/compatibility.c" "$PKG/auth.c" "$PKG/portstats.c" "$PKG/metrics.c" "$PKG/telemetry.c" \
+  "$PKG/websocket_disabled.c" \
   "$PKG/../pd690xx/libpd690xx.c" "$PKG/../postmerkos/libpostmerkos.c" \
   $(pkg-config --libs json-c) -lcrypt
 BOOT_TMP=$(mktemp -d)
@@ -94,3 +95,29 @@ grep -q '"message":"Network bootstrap complete"' "$BOOT_TMP/result.json"
 [ ! -s "$BOOT_TMP/err" ]
 rm -rf "$BOOT_TMP"
 printf '%s\n' 'configd condensed bootstrap output test passed'
+
+OUT=${TMPDIR:-/tmp}/configd-test-portstats
+cc -std=gnu11 -Wall -Wextra -Werror -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE \
+  -I"$PKG" \
+  -o "$OUT" "$HERE/test_portstats.c" "$PKG/portstats.c"
+"$OUT"
+
+OUT=${TMPDIR:-/tmp}/configd-test-metrics
+cc -std=gnu11 -Wall -Wextra -Werror -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE \
+  -I"$PKG" \
+  -o "$OUT" "$HERE/test_metrics.c" "$PKG/metrics.c" "$PKG/portstats.c"
+"$OUT"
+
+OUT=${TMPDIR:-/tmp}/configd-test-metrics-server
+cc -std=gnu11 -Wall -Wextra -Werror -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE \
+  -I"$PKG" \
+  -o "$OUT" "$HERE/test_metrics_server.c" "$PKG/metrics.c" "$PKG/portstats.c"
+"$OUT"
+
+OUT=${TMPDIR:-/tmp}/configd-test-telemetry
+cc -std=gnu11 -Wall -Wextra -Werror -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE \
+  -I"$PKG" -I"$PKG/../postmerkos" -I"$PKG/../pd690xx" $(pkg-config --cflags json-c) \
+  -o "$OUT" "$HERE/test_telemetry.c" "$PKG/telemetry.c" "$PKG/metrics.c" "$PKG/portstats.c" \
+  "$PKG/../postmerkos/libpostmerkos.c" "$PKG/../pd690xx/libpd690xx.c" \
+  $(pkg-config --libs json-c)
+"$OUT"

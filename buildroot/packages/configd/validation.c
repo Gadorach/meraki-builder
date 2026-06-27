@@ -1,6 +1,7 @@
 #include "validation.h"
 #include "configd.h"
 #include "network.h"
+#include "telemetry.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -313,11 +314,12 @@ int validate_configuration(struct json_object *config,
                            char *error, size_t error_size) {
   if (!config || !json_object_is_type(config, json_type_object))
     return bad(error, error_size, "configuration must be a JSON object");
-  const char *keys[] = {"network", "ports", "stp", "lacp", "multicast"};
-  if (reject_unknown(config, keys, 5, "configuration",
+  const char *keys[] = {"network", "ports", "stp", "lacp", "multicast", "telemetry"};
+  if (reject_unknown(config, keys, 6, "configuration",
                      error, error_size) != 0) return -EINVAL;
   if (validate_network_schema(config, error, error_size) != 0 ||
       validate_ports(config, error, error_size) != 0 ||
-      validate_globals(config, error, error_size) != 0) return -EINVAL;
+      validate_globals(config, error, error_size) != 0 ||
+      telemetry_validate(config, error, error_size) != 0) return -EINVAL;
   return 0;
 }
