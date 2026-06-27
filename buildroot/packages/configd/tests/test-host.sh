@@ -58,6 +58,13 @@ cc -std=gnu11 -Wall -Wextra -Werror -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE 
   "$HERE/test_service_ops.c" "$PKG/service_ops.c" $(pkg-config --libs json-c)
 "$SERVICE_OUT"
 
+RELEASE_OUT=${TMPDIR:-/tmp}/configd-test-release
+cc -std=gnu11 -Wall -Wextra -Werror \
+  -I"$PKG" $(pkg-config --cflags json-c) \
+  -o "$RELEASE_OUT" "$HERE/test_release.c" "$PKG/release.c" \
+  $(pkg-config --libs json-c)
+"$RELEASE_OUT"
+
 HEALTH_OUT=${TMPDIR:-/tmp}/postmerkosctl-test-health
 cc -std=gnu11 -Wall -Wextra -Werror -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE \
   -I"$PKG" $(pkg-config --cflags json-c) -o "$HEALTH_OUT" \

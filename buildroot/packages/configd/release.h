@@ -3,5 +3,6 @@
 #include <json-c/json.h>
 struct json_object *release_info_load(void);
 const char *release_version(void);
+const char *release_project_repo(void);
 const char *release_model_compatibility(const char *model);
 #endif

@@ -5,6 +5,7 @@
 
 static char cached_version[64];
 static char cached_compatibility[40];
+static char cached_project_repo[160];
 
 struct json_object *release_info_load(void) {
   const char *path = getenv("POSTMERKOS_RELEASE_FILE");
@@ -31,6 +32,18 @@ const char *release_version(void) {
   snprintf(cached_version, sizeof(cached_version), "%s", version);
   json_object_put(release);
   return cached_version;
+}
+
+const char *release_project_repo(void) {
+  struct json_object *release = release_info_load();
+  struct json_object *value = NULL;
+  const char *repo = "";
+  if (json_object_object_get_ex(release, "project_repo", &value) &&
+      json_object_is_type(value, json_type_string))
+    repo = json_object_get_string(value);
+  snprintf(cached_project_repo, sizeof(cached_project_repo), "%s", repo);
+  json_object_put(release);
+  return cached_project_repo;
 }
 
 
