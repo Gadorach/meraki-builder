@@ -35,7 +35,7 @@ struct json_object *compatibility_report_json(void){
   char masked[18]="unknown";
   if(strlen(meraki_mac)==17)snprintf(masked,sizeof(masked),"%c%c:%c%c:%c%c:xx:xx:xx",meraki_mac[0],meraki_mac[1],meraki_mac[3],meraki_mac[4],meraki_mac[6],meraki_mac[7]);
   json_object_object_add(report,"mac_oui",json_object_new_string(masked));
-  json_object_object_add(report,"project_issue_path",json_object_new_string("GitHub repository Issues → Compatibility report"));
+  json_object_object_add(report,"project_repo",json_object_new_string(release_project_repo()));
   return report;
 }
 struct json_object *compatibility_notice_json(void){
