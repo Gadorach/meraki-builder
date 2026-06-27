@@ -57,14 +57,19 @@ loader_manifest="${MS42P_LOADER_MANIFEST:-}"
 recovery_artifact_dir="${MS42P_RECOVERY_ARTIFACT_DIR:-}"
 [ -s "$loader_manifest" ] || { echo "meraki-redboot capability manifest is missing" >&2; exit 1; }
 [ -d "$recovery_artifact_dir" ] || { echo "Recovery artifact directory is missing" >&2; exit 1; }
-python3 - "$TARGET_DIR/etc/postmerkos-release.json" "$release" "$build_version" "$revision" "$validated_models" "$loader_manifest" "$recovery_artifact_dir" <<'PY_RELEASE'
+project_repo="${POSTMERKOS_PROJECT_REPO:-Gadorach/meraki-builder}"
+if ! printf '%s' "$project_repo" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'; then
+    echo "POSTMERKOS_PROJECT_REPO is not a valid owner/repo slug: $project_repo" >&2
+    exit 1
+fi
+python3 - "$TARGET_DIR/etc/postmerkos-release.json" "$release" "$build_version" "$revision" "$validated_models" "$loader_manifest" "$recovery_artifact_dir" "$project_repo" <<'PY_RELEASE'
 import hashlib
 import json
 import re
 import sys
 from pathlib import Path
 
-output, release, build_time, revision, validated_raw, loader_manifest_path, recovery_dir_raw = sys.argv[1:]
+output, release, build_time, revision, validated_raw, loader_manifest_path, recovery_dir_raw, project_repo = sys.argv[1:]
 recovery_dir = Path(recovery_dir_raw)
 models = [
     "MS22", "MS22P",
@@ -204,6 +209,7 @@ for family in ("luton26", "jaguar1"):
     }
 data = {
     "version": release,
+    "project_repo": project_repo,
     "build_time_utc": build_time,
     "git_revision": revision,
     "target_family": "vcore3",
