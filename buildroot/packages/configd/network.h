@@ -49,4 +49,10 @@ const struct network_runtime *network_manager_runtime(void);
 int network_parse_cidr(const char *cidr, struct ipv4_runtime *value,
                        char *error, size_t error_size);
 
+/* Render /etc/resolv.conf (override path with $CONFIGD_RESOLV_CONF) from the
+ * IPv4 DNS servers in value. No-op when value carries no servers, and skips the
+ * write when the file already matches to avoid needless NOR flash wear. Returns
+ * 0 on success or when nothing needed doing, negative errno on failure. */
+int network_render_resolv_conf(const struct ipv4_runtime *value);
+
 #endif

@@ -5,6 +5,7 @@
 #include "configd.h"
 #include "json_util.h"
 #include "network.h"
+#include "telemetry.h"
 #include "validation.h"
 #include <libpostmerkos.h>
 
@@ -19,6 +20,7 @@ struct json_object *config_create_defaults(struct apply_result *result) {
   json_deep_merge(config, globals);
   json_object_put(globals);
   json_object_object_add(config, "network", network_default_config());
+  json_object_object_add(config, "telemetry", telemetry_default_config());
   return config;
 }
 

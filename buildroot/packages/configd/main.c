@@ -7,7 +7,9 @@
 #include "network.h"
 #include "local_socket.h"
 #include "result.h"
+#include "ssh_keys.h"
 #include "status.h"
+#include "telemetry.h"
 #include "validation.h"
 #include "websocket.h"
 
@@ -530,6 +532,15 @@ int main(int argc, char **argv) {
   }
 
   network_manager_init(config, &startup);
+  {
+    char ssh_error[200] = {0};
+    if (ssh_keys_render(ssh_error, sizeof(ssh_error)) != 0)
+      fprintf(stderr, "%s configd: authorized_keys render failed: %s\n",
+              get_time(), ssh_error);
+  }
+  const struct network_runtime *net_rt = network_manager_runtime();
+  const char *mgmt_addr = (net_rt && net_rt->applied.address[0]) ? net_rt->applied.address : NULL;
+  telemetry_apply(config, mgmt_addr);
 
   if (command == COMMAND_REPLACE_FILE) {
     struct json_object *candidate = load_json_file(command_value);
@@ -647,6 +658,7 @@ int main(int argc, char **argv) {
   signal(SIGINT, signal_handler);
   signal(SIGTERM, signal_handler);
   long network_poll_due = 0;
+  long telemetry_poll_due = 0;
   int service_exit_code = 0;
   const char *service_exit_reason = "signal-requested";
   while (running) {
@@ -656,6 +668,10 @@ int main(int argc, char **argv) {
       unsigned int next_poll = network_manager_next_poll_seconds();
       if (next_poll < 1) next_poll = 1;
       network_poll_due = now + (long)next_poll;
+    }
+    if (now >= telemetry_poll_due) {
+      telemetry_tick();
+      telemetry_poll_due = now + telemetry_interval_seconds();
     }
     int local_rc = local_socket_service_once(local_fd, 50);
     if (local_rc < 0) {

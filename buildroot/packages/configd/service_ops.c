@@ -129,6 +129,7 @@ static const char *service_pattern(const char *service) {
   if (!strcmp(service, "ssh")) return "dropbear";
   if (!strcmp(service, "web")) return "uhttpd";
   if (!strcmp(service, "chrony")) return "chrony";
+  if (!strcmp(service, "snmp")) return "snmpd";   /* matches S16snmpd init script */
   return NULL;
 }
 
@@ -163,6 +164,7 @@ static const char *service_process_name(const char *service) {
   if (!strcmp(service, "ssh")) return "dropbear";
   if (!strcmp(service, "web")) return "uhttpd";
   if (!strcmp(service, "chrony")) return "chronyd";
+  if (!strcmp(service, "snmp")) return "mini-snmpd";
   return NULL;
 }
 
