@@ -1,0 +1,75 @@
+#!/bin/sh
+#
+# mini_snmpd: read-only SNMP v2c IF-MIB for switch-port counters.
+#
+# Started only when telemetry.snmp.enabled is true in /etc/switch.json AND
+# configd has rendered the runtime env file /run/postmerkos/snmpd.env.
+# configd also drives runtime start/stop via this same script (service "snmp").
+#
+# The switch-port IF-MIB rows come from /run/postmerkos/portstats.v1 via the
+# 0001-ifmib-from-portstats-file.patch; the management interface (linux_mgmt)
+# is served from /proc/net/dev at ifIndex 1000.
+#
+# mini_snmpd 1.6 CLI used here:
+#   -c STR   community string
+#   -L STR   system location
+#   -C STR   system contact
+#   -i IFACE comma-separated interface list (management iface; switch ports
+#            are appended by the portstats patch)
+#   -n       run in foreground (so start-stop-daemon owns the pidfile)
+#   -p PORT  UDP port (161)
+#
+# NOTE: mini_snmpd 1.6 has NO bind-to-address option (only -I/--listen which
+# is bind-to-DEVICE). SNMP_BIND from snmpd.env is therefore not applied as a
+# listen address here; the daemon binds 0.0.0.0:161. This is a known
+# limitation of the packaged version (spec 8.8 wants mgmt-only bind).
+#
+DAEMON=${SNMPD_DAEMON:-/usr/sbin/mini-snmpd}
+ENV_FILE=${CONFIGD_SNMPD_ENV:-/run/postmerkos/snmpd.env}
+CONFIG=${CONFIGD_CONFIG:-/etc/switch.json}
+PIDFILE=${SNMPD_PIDFILE:-/run/mini_snmpd.pid}
+MGMT_IFACE=${SNMPD_MGMT_IFACE:-linux_mgmt}
+UDP_PORT=${SNMPD_UDP_PORT:-161}
+
+snmp_enabled() {
+    # Dependency-free check of the JSON config: the "snmp" object must carry
+    # "enabled": true. grep -A keeps it cheap and tolerant of formatting.
+    grep -q '"snmp"' "$CONFIG" 2>/dev/null &&
+    grep -A8 '"snmp"' "$CONFIG" 2>/dev/null | grep -q '"enabled"[[:space:]]*:[[:space:]]*true'
+}
+
+start() {
+    [ -x "$DAEMON" ] || { echo "snmpd: missing binary"; return 1; }
+    snmp_enabled || { echo "snmpd: disabled"; return 0; }
+    [ -f "$ENV_FILE" ] || { echo "snmpd: no runtime env yet"; return 0; }
+
+    # Sourced env provides SNMP_COMMUNITY / SNMP_LOCATION / SNMP_CONTACT /
+    # SNMP_BIND (the latter is informational only here; see note above).
+    . "$ENV_FILE"
+
+    printf 'Starting mini_snmpd: '
+    start-stop-daemon -S -b -m -p "$PIDFILE" -x "$DAEMON" -- \
+        -n \
+        -p "$UDP_PORT" \
+        -c "${SNMP_COMMUNITY:-public}" \
+        -L "${SNMP_LOCATION:-}" \
+        -C "${SNMP_CONTACT:-}" \
+        -i "$MGMT_IFACE"
+    echo OK
+}
+
+stop() {
+    printf 'Stopping mini_snmpd: '
+    start-stop-daemon -K -q -p "$PIDFILE" -x "$DAEMON" 2>/dev/null
+    rm -f "$PIDFILE"
+    echo OK
+}
+
+case "$1" in
+    start) start ;;
+    stop) stop ;;
+    restart|reload) stop; sleep 1; start ;;
+    *) echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac
+
+exit $?

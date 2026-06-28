@@ -11,9 +11,11 @@
 #include "roles.h"
 #include "release.h"
 #include "ssh_keys.h"
+#include "session.h"
 #include "status.h"
 #include "system_ops.h"
 #include "service_ops.h"
+#include "telemetry.h"
 #include "time_ops.h"
 #include "validation.h"
 
@@ -48,6 +50,7 @@ struct per_session_data {
   bool authenticated;
   enum postmerkos_role role;
   char username[65];
+  char session_token[65];
   unsigned int auth_failures;
   bool send_initial_status;
   bool send_initial_config;
@@ -713,6 +716,48 @@ static int handle_request(struct lws *wsi, struct per_session_data *session,
     session->send_initial_status = true;
     session->send_initial_config = true;
     struct json_object *auth = role_identity_json(username);
+    struct json_object *remember_obj = NULL;
+    bool remember = data && json_object_object_get_ex(data, "remember", &remember_obj) &&
+                    json_object_get_boolean(remember_obj);
+    long now = (long)time(NULL);
+    long ttl = remember ? SESSION_TTL_REMEMBER : SESSION_TTL_DEFAULT;
+    const char *token = session_create(username, ttl, now);
+    if (token) {
+      snprintf(session->session_token, sizeof(session->session_token), "%s", token);
+      json_object_object_add(auth, "token", json_object_new_string(token));
+      json_object_object_add(auth, "expires_at", json_object_new_int64((int64_t)(now + ttl)));
+    }
+    if (role_has_capability(session->role, "users.manage"))
+      json_object_object_add(auth, "users", auth_list_users());
+    queue_response(wsi, session, "auth", auth, request_id);
+    json_object_put(auth);
+    return 0;
+  }
+
+  if (!strcmp(type, "auth_token")) {
+    struct json_object *data = request_data_object(message);
+    const char *token = object_string(data, "token");
+    char username[65] = {0};
+    long now = (long)time(NULL);
+    if (!token || session_lookup(token, now, username, sizeof(username)) != 0) {
+      queue_error(wsi, session, request_id, 401, "Unauthorized", "session expired");
+      return 0;
+    }
+    enum postmerkos_role role = role_for_username(username);
+    if (role == POSTMERKOS_ROLE_NONE) {
+      session_revoke_token(token);
+      queue_error(wsi, session, request_id, 403, "Forbidden",
+                  "account has no postmerkOS management role");
+      return 0;
+    }
+    session->authenticated = true;
+    session->role = role;
+    session->auth_failures = 0;
+    snprintf(session->username, sizeof(session->username), "%s", username);
+    snprintf(session->session_token, sizeof(session->session_token), "%s", token);
+    session->send_initial_status = true;
+    session->send_initial_config = true;
+    struct json_object *auth = role_identity_json(username);
     if (role_has_capability(session->role, "users.manage"))
       json_object_object_add(auth, "users", auth_list_users());
     queue_response(wsi, session, "auth", auth, request_id);
@@ -721,6 +766,8 @@ static int handle_request(struct lws *wsi, struct per_session_data *session,
   }
 
   if (!strcmp(type, "logout")) {
+    session_revoke_token(session->session_token);
+    session->session_token[0] = '\0';
     session->authenticated = false;
     session->role = POSTMERKOS_ROLE_NONE;
     session->username[0] = '\0';
@@ -769,6 +816,7 @@ static int handle_request(struct lws *wsi, struct per_session_data *session,
     if (!require_capability(wsi, session, request_id, "users.manage")) return 0;
     struct json_object *data=request_data_object(message);const char *username=object_string(data,"username");char error[256]={0};
     if(auth_delete_user(username,error,sizeof(error))!=0){queue_bad_request(wsi,session,request_id,error);return 0;}
+    session_revoke_user(username);
     struct json_object *reply=json_object_new_object();json_object_object_add(reply,"message",json_object_new_string("Account deleted"));json_object_object_add(reply,"users",auth_list_users());queue_response(wsi,session,"users",reply,request_id);json_object_put(reply);return 0;
   }
   if (!strcmp(type, "user_role")) {
@@ -831,6 +879,7 @@ static int handle_request(struct lws *wsi, struct per_session_data *session,
       queue_error(wsi, session, request_id, 400, "Password update failed", error);
       return 0;
     }
+    session_revoke_user(target);
     struct json_object *ack = json_object_new_object();
     json_object_object_add(ack, "message",
                            json_object_new_string("Password updated"));
@@ -1202,6 +1251,9 @@ static int handle_request(struct lws *wsi, struct per_session_data *session,
   json_object_put(ack);
   apply_result_cleanup(&result);
   config_file_mtime(&config_mtime_ns);
+  const struct network_runtime *net_rt = network_manager_runtime();
+  const char *mgmt_addr = (net_rt && net_rt->applied.address[0]) ? net_rt->applied.address : NULL;
+  telemetry_apply(saved, mgmt_addr);
   refresh_config_cache(saved, true);
   refresh_status_cache(true);
   json_object_put(saved);
