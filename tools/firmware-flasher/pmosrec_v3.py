@@ -54,6 +54,15 @@ BOOT_BANNER_PREFIXES = (
     "Linux version",
 )
 
+LIVEBOOT_REQUIRED_CMDLINE = (
+    "mem=120M",
+    "rd_start=0x87000000",
+    "root=/dev/ram0",
+    "rootfstype=squashfs",
+    "postmerkos.live=1",
+)
+LIVEBOOT_USERSPACE_READY = "PMOSLIVE USERSPACE-READY ROOT=ram0 OVERLAY=tmpfs FLASH_MOUNTED=0"
+
 # Linux asm-generic termios2 values. These are stable for the supported Linux hosts.
 TCGETS2 = 0x802C542A
 TCSETS2 = 0x402C542B
@@ -929,6 +938,121 @@ def wait_for_flash_success(link: SerialLink, operation_timeout: float) -> str:
             phase = ended.group(1)
             print(f"[flasher] {labels[phase]}: 100% complete", flush=True)
 
+def _kernel_message(line: str) -> str:
+    """Remove a conventional printk timestamp while retaining plain status lines."""
+    if line.startswith("["):
+        marker = line.find("] ")
+        if marker >= 0:
+            return line[marker + 2 :]
+    return line
+
+
+def wait_for_liveboot_success(link: SerialLink, timeout: float) -> str:
+    """Require proof that Linux used the transferred RAM root.
+
+    A generic Linux banner is not enough: the failed hardware test reached the
+    transferred kernel but silently fell back to the compiled flash command
+    line and mounted MTD device 31:3.  Treat each early-boot invariant as part
+    of the PMOSLIVE protocol so that failure cannot be reported as success.
+    """
+    deadline = time.monotonic() + timeout
+    saw_prom_args = False
+    saw_firmware_cmdline = False
+    saw_initrd = False
+    saw_cmdline = False
+    saw_ram_root = False
+
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            missing = []
+            if not saw_prom_args:
+                missing.append("VCore-III argv acceptance")
+            if not saw_firmware_cmdline:
+                missing.append("firmware command-line selection")
+            if not saw_initrd:
+                missing.append("initrd reservation")
+            if not saw_cmdline:
+                missing.append("live kernel command line")
+            if not saw_ram_root:
+                missing.append("RAM-root mount")
+            raise ProtocolError(
+                "timed out before PMOSLIVE userspace attestation; missing: "
+                + ", ".join(missing)
+            )
+
+        line = link.read_line(remaining)
+        message = _kernel_message(line)
+
+        if "Initrd not found or empty" in message:
+            raise ProtocolError(
+                "PMOSLIVE kernel handoff failed: Linux rejected or did not receive the external initrd"
+            )
+        if message.startswith("MIPS CMDLINE-SOURCE="):
+            source = message.split("=", 1)[1]
+            if source != "firmware":
+                raise ProtocolError(
+                    f"PMOSLIVE kernel handoff failed: command-line source was {source}, not firmware"
+                )
+            saw_firmware_cmdline = True
+        elif message.startswith("VCOREIII PROM ARGV-ACCEPTED "):
+            saw_prom_args = True
+        elif message.startswith("VCOREIII PROM ARGV-ABSENT"):
+            raise ProtocolError(
+                "PMOSLIVE kernel handoff failed: VCore-III did not accept argc/argv/envp"
+            )
+        elif message.startswith("Initial ramdisk at:"):
+            saw_initrd = True
+        elif message.startswith("Kernel command line:"):
+            command_line = message.split(":", 1)[1].strip()
+            tokens = set(command_line.split())
+            missing = [token for token in LIVEBOOT_REQUIRED_CMDLINE if token not in tokens]
+            if not any(token.startswith("rd_size=") for token in tokens):
+                missing.append("rd_size=<bytes>")
+            if missing:
+                raise ProtocolError(
+                    "PMOSLIVE kernel handoff failed: live command line is missing "
+                    + ", ".join(missing)
+                )
+            if "root=/dev/mtdblock3" in tokens or "mem=134152192" in tokens:
+                raise ProtocolError(
+                    "PMOSLIVE kernel handoff failed: compiled flash-root arguments remained active"
+                )
+            saw_cmdline = True
+        elif message.startswith("VFS: Mounted root"):
+            if "device 31:3" in message:
+                raise ProtocolError(
+                    "PMOSLIVE kernel handoff failed: Linux mounted the SPI-flash SquashFS (device 31:3)"
+                )
+            if "squashfs filesystem" in message and "device 1:0" in message:
+                saw_ram_root = True
+            elif "squashfs filesystem" in message:
+                raise ProtocolError(
+                    "PMOSLIVE kernel handoff failed: SquashFS root was not mounted from RAM disk device 1:0"
+                )
+        elif message.startswith("PMOSLIVE USERSPACE-READY"):
+            if message != LIVEBOOT_USERSPACE_READY:
+                raise ProtocolError(f"invalid PMOSLIVE userspace attestation: {message}")
+            missing = []
+            if not saw_prom_args:
+                missing.append("VCore-III argv acceptance")
+            if not saw_firmware_cmdline:
+                missing.append("firmware command-line selection")
+            if not saw_initrd:
+                missing.append("initrd reservation")
+            if not saw_cmdline:
+                missing.append("live command line")
+            if not saw_ram_root:
+                missing.append("RAM-root mount")
+            if missing:
+                raise ProtocolError(
+                    "PMOSLIVE userspace started before the kernel handoff was proven: "
+                    + ", ".join(missing)
+                )
+            print("[liveboot] Standard MIPS/U-Boot kernel handoff verified.", flush=True)
+            return message
+
+
 def send_liveboot_v3(link: SerialLink, bundle: BundleInfo, selection: TransportSelection,
                      *, dry_run: bool, force: bool, auto_confirm: bool = True,
                      verbose_acks: bool = False,
@@ -999,12 +1123,7 @@ def send_liveboot_v3(link: SerialLink, bundle: BundleInfo, selection: TransportS
     link.wait_for(("PMOSLIVE UART-BASELINE-READY RATE=115200",), 5.0)
     exec_line = link.wait_for(("PMOSLIVE EXEC ENTRY=",), 5.0)
     print(f"[liveboot] {exec_line}", flush=True)
-    try:
-        banner = link.wait_for(BOOT_BANNER_PREFIXES, boot_timeout)
-        print(f"[liveboot] Linux boot output detected: {banner}", flush=True)
-        return banner
-    except ProtocolError:
-        return exec_line
+    return wait_for_liveboot_success(link, boot_timeout)
 
 
 def send_package_v3(link: SerialLink, bundle: BundleInfo, selection: TransportSelection,

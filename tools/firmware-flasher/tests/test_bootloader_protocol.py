@@ -140,6 +140,7 @@ class BundleFixture:
             "flash_access": "none",
             "transport_contract": "pmosrec-v3-adaptive-uart-sparse-lz4-v1",
             "linux_handoff": "mips-legacy-argc-argv-envp-external-initrd-v1",
+            "kernel_boot_argument_contract": "vcoreiii-standard-mips-argc-argv-envp-fallback-v1",
             "rootfs_handoff": "squashfs-as-legacy-initrd-v1",
             "ram_layout": {
                 "kernel_load_address": 0x81000000,
@@ -230,6 +231,7 @@ class BundleFixture:
                     "transport_contract": "pmosrec-v3-adaptive-uart-sparse-lz4-v1",
                     "transport_integrity": ["frame-crc32", "compact-ack-crc32", "object-crc32", "object-sha256", "reconstructed-image-sha256"],
                     "linux_handoff": "mips-legacy-argc-argv-envp-external-initrd-v1",
+                    "kernel_boot_argument_contract": "vcoreiii-standard-mips-argc-argv-envp-fallback-v1",
                     "rootfs_handoff": "squashfs-as-legacy-initrd-v1",
                     "payloads": {"jaguar1": live_record},
                 },
@@ -243,6 +245,8 @@ class BundleFixture:
                 "rootfs_sha256": hashlib.sha256(rootfs).hexdigest(),
                 "kernel_payload": {
                     "format": "postmerkos.vcoreiii-payload.v1",
+                    "boot_argument_contract": "vcoreiii-standard-mips-argc-argv-envp-fallback-v1",
+                    "build_contract_sha256": "a" * 64,
                     "header_bytes": bp.SPIM_HEADER.size,
                     "payload_bytes": len(kernel),
                     "alignment_bytes": bp.SPIM_ALIGNMENT,
@@ -732,6 +736,37 @@ class ProtocolTests(unittest.TestCase):
             info = bp.validate_bundle(bundle.image, bundle.manifest, "MS42P", force=False)
             self.assertEqual(info.family, "jaguar1")
             with self.assertRaisesRegex(bp.ProtocolError, "PMOSLIVE|liveboot|menu option 3"):
+                bp.validate_bundle(
+                    bundle.image, bundle.manifest, "MS42P", force=False,
+                    require_liveboot=True,
+                )
+
+    def test_unbound_kernel_artifact_remains_flashable_but_not_liveboot_capable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            bundle = BundleFixture(Path(temp))
+            manifest = json.loads(bundle.manifest.read_text())
+            manifest["artifact"]["kernel_payload"].pop("boot_argument_contract", None)
+            bundle.manifest.write_text(json.dumps(manifest) + "\n")
+
+            info = bp.validate_bundle(bundle.image, bundle.manifest, "MS42P", force=False)
+            self.assertEqual(info.family, "jaguar1")
+            with self.assertRaisesRegex(bp.ProtocolError, "not bound"):
+                bp.validate_bundle(
+                    bundle.image, bundle.manifest, "MS42P", force=False, require_liveboot=True
+                )
+
+    def test_old_live_manifest_remains_flashable_but_is_not_liveboot_capable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            bundle = BundleFixture(Path(temp))
+            manifest = json.loads(bundle.manifest.read_text())
+            live = manifest["recovery"]["uart_liveboot"]
+            live.pop("kernel_boot_argument_contract", None)
+            live["payloads"]["jaguar1"].pop("kernel_boot_argument_contract", None)
+            bundle.manifest.write_text(json.dumps(manifest) + "\n")
+
+            info = bp.validate_bundle(bundle.image, bundle.manifest, "MS42P", force=False)
+            self.assertEqual(info.family, "jaguar1")
+            with self.assertRaisesRegex(bp.ProtocolError, "rebuilt kernel"):
                 bp.validate_bundle(
                     bundle.image, bundle.manifest, "MS42P", force=False,
                     require_liveboot=True,

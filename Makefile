@@ -113,6 +113,9 @@ test-fwupdate:
 
 test-image:
 	@./buildroot/board/meraki/ms220/tests/test-post-image.sh
+	@python3 ./scripts/tests/test-liveboot-kernel-config.py
+	@python3 ./scripts/tests/test-kernel-uboot-args-patch.py
+	@python3 ./scripts/tests/test-kernel-build-contract.py
 	@python3 ./scripts/tests/test-artifact-manifest.py
 	@python3 ./scripts/tests/test-build-cache-contract.py
 	@python3 ./scripts/tests/test-pipefail-feature-probe.py

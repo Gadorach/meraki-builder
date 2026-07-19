@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 source "$(dirname "$0")/common.sh"
 
+if [[ -d "$SWITCH_DIR/.git" && -d "$SWITCH_DIR/linux-3.18" ]]; then
+  "$SCRIPT_DIR/apply-kernel-patches.sh" --reverse
+fi
+
 if [[ ! -d "$SWITCH_DIR/.git" ]]; then
   if bool_enabled "${AUTO_CLONE:-0}" || ask_yes_no "Kernel/OpenWrt source is missing. Clone it now?" yes; then
     clone_or_update_ref "$SWITCH_REPO_URL" "$SWITCH_DIR" "$SWITCH_REF" "switch-11-22-ms220"

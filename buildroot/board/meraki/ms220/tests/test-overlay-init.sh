@@ -5,6 +5,7 @@ SCRIPT="$ROOT/overlay/etc/init.d/S01postmerkos-overlay"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 mkdir -p "$TMP/bin" "$TMP/run" "$TMP/overlay" "$TMP/etc" "$TMP/root"
+: >"$TMP/console"
 : >"$TMP/mounts"
 : >"$TMP/cmdline"
 
@@ -53,6 +54,7 @@ run_init() {
   POSTMERKOS_OVERLAY_RECOVERY_MARKER="$TMP/run/recovery.json" \
   POSTMERKOS_LIVE_MARKER="$TMP/run/live.json" \
   POSTMERKOS_OVERLAY_LOG="$TMP/run/overlay.log" \
+  POSTMERKOS_CONSOLE="$TMP/console" \
   MOCK_PERSISTENT_FAIL="${1:-0}" "$SCRIPT" start
 }
 
@@ -92,5 +94,6 @@ grep -q '"flash_mounted":false' "$TMP/run/live.json"
 grep -q '"persistence":false' "$TMP/run/recovery.json"
 grep -Fq "$TMP/etc overlay" "$TMP/mounts"
 grep -Fq "$TMP/root overlay" "$TMP/mounts"
+grep -Fq 'PMOSLIVE USERSPACE-READY ROOT=ram0 OVERLAY=tmpfs FLASH_MOUNTED=0' "$TMP/console"
 
 printf '%s\n' 'early overlay recovery and PMOSLIVE init tests passed'

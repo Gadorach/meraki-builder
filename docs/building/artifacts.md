@@ -15,6 +15,9 @@ loader1.bin.manifest.json
 loader1.bin.source.json
 meraki-redboot-version.txt
 meraki-redboot-source-revision.txt
+kernel/vmlinuz
+kernel/vmlinuz.bin
+kernel/pmoslive-kernel-contract.json
 tools/mkvcoreiii_payload.py
 recovery/recovery-luton26.bin
 recovery/recovery-luton26.bin.sha256
@@ -43,7 +46,12 @@ The SPIM region contains a 32-byte header followed by a zero-padded,
 32-byte-aligned compressed kernel. The finalizer verifies load and entry
 addresses, reserved words, payload length, hard slot boundary, CRC-32, and
 payload SHA-256. The manifest records all of these values under
-`artifact.kernel_payload`.
+`artifact.kernel_payload`. Live-capable images additionally bind that payload to
+the verified kernel build contract and the
+`vcoreiii-standard-mips-argc-argv-envp-fallback-v1` handoff. The finalizer
+refuses to publish PMOSLIVE capability when the SPIM payload does not match the
+recorded `vmlinuz.bin`; ordinary flashing remains available for older valid
+images.
 
 The release manifest also records:
 

@@ -276,6 +276,41 @@ Path(loader_output).write_text(json.dumps({
     },
 }, indent=2, sort_keys=True) + '\n')
 PY
+python3 - "$TMP/test.bin" "$TMP/kernel-contract.json" <<'PY_KERNEL_CONTRACT'
+import hashlib, json, struct, sys
+image_path, output_path = sys.argv[1:]
+data = open(image_path, 'rb').read()
+header = struct.Struct('<8I')
+_, _, payload_bytes, _, _, _, _, _ = header.unpack_from(data, 0x40000)
+payload = data[0x40000 + header.size:0x40000 + header.size + payload_bytes]
+required = {
+    'CONFIG_BLOCK': 'y', 'CONFIG_BLK_DEV': 'y', 'CONFIG_BLK_DEV_INITRD': 'y',
+    'CONFIG_BLK_DEV_RAM': 'y', 'CONFIG_BLK_DEV_RAM_COUNT': '1',
+    'CONFIG_BLK_DEV_RAM_SIZE': '16384', 'CONFIG_RD_XZ': 'y',
+    'CONFIG_SQUASHFS': 'y', 'CONFIG_SQUASHFS_XZ': 'y', 'CONFIG_XZ_DEC': 'y',
+    'CONFIG_DECOMPRESS_XZ': 'y', 'CONFIG_CMDLINE_BOOL': 'y',
+    'CONFIG_CMDLINE_OVERRIDE': 'n', 'CONFIG_CMDLINE_FALLBACK': 'y',
+}
+record = {
+    'format': 'postmerkos.kernel-build-contract.v1',
+    'kernel_version': '3.18.123',
+    'boot_argument_contract': 'vcoreiii-standard-mips-argc-argv-envp-fallback-v1',
+    'source_revision': 'smoke-source-revision',
+    'managed_patch': {'filename': 'fixture.patch', 'sha256': '0' * 64},
+    'config_policy': {
+        'filename': 'configure-liveboot-kernel.py', 'sha256': '1' * 64,
+        'required': dict(sorted(required.items())),
+    },
+    'resolved_config': dict(sorted(required.items())),
+    'artifacts': {
+        'vmlinuz': {'filename': 'vmlinuz', 'bytes': len(payload), 'sha256': hashlib.sha256(payload).hexdigest()},
+        'vmlinuz_bin': {'filename': 'vmlinuz.bin', 'bytes': len(payload), 'sha256': hashlib.sha256(payload).hexdigest()},
+        'headers': {'filename': 'linux-3.18.123.tar.bz2', 'bytes': 1, 'sha256': '2' * 64},
+    },
+}
+open(output_path, 'w', encoding='utf-8').write(json.dumps(record, indent=2, sort_keys=True) + '\n')
+PY_KERNEL_CONTRACT
+
 (cd "$TMP" && sha256sum test.bin > test.bin.sha256)
 (cd "$TMP" && sha256sum test.bin.manifest.json > test.bin.manifest.json.sha256)
 
@@ -286,7 +321,8 @@ cp "$TMP/test.bin" "$TMP/ms42p-postmerkos-test.bin"
 python3 "$ROOT/scripts/write-artifact-manifest.py" \
     "$TMP/test.bin.manifest.json" "$TMP/ms42p-postmerkos-test.bin.manifest.json" \
     "$TMP/ms42p-postmerkos-test.bin" "$TMP/rootfs.squashfs" \
-    "$TMP/loader.manifest.json" "$TMP/recovery" "$TMP/liveboot"
+    "$TMP/loader.manifest.json" "$TMP/recovery" "$TMP/liveboot" \
+    "$TMP/kernel-contract.json"
 python3 - "$TMP/ms42p-postmerkos-test.bin" "$TMP/ms42p-postmerkos-test.bin.manifest.json" <<'PY_PUBLISHED_MANIFEST'
 import hashlib, json, os, sys
 image, manifest_path = sys.argv[1:]

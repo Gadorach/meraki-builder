@@ -1,3 +1,10 @@
+# 2026-07-19 PMOSLIVE standard MIPS/U-Boot kernel handoff
+
+- Added a managed VCore-III Linux 3.18 patch that accepts the standard 32-bit MIPS `argc`/`argv`/`envp` boot convention and retains the compiled SPI-flash command line only as a no-arguments fallback.
+- Added compatibility with U-Boot legacy `memsize`, `initrd_start`, and `initrd_size` environment records.
+- Bound live capability to a content-verified kernel build contract so stale pre-patch kernels remain normally flashable but cannot be advertised for PMOSLIVE.
+- Required kernel, initrd, RAM-root, and live-userspace evidence before the host reports a successful live boot.
+
 # 2026-06-30 responsive interface, PMC parity, and local discovery
 
 - Added phone-specific accordion port editing, six-port groups, atomic SFP pairs, outlined/labelled banks, bounded All Ports cloning, collapsed port names, and an eight-card responsive header.

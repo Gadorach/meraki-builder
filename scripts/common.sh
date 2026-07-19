@@ -28,6 +28,8 @@ KERNEL_DIR="$SWITCH_DIR/linux-3.18"
 CROSS_COMPILE="$OPENWRT_DIR/staging_dir_mipsel_nofpu_3.18/bin/mipsel-linux-musl-"
 KERNEL_HEADERS_TARBALL="$BUILD_DIR/linux-3.18.123.tar.bz2"
 KERNEL_ARTIFACT_DIR="$ARTIFACTS_DIR/kernel"
+KERNEL_BUILD_CONTRACT_RECORD="$KERNEL_ARTIFACT_DIR/pmoslive-kernel-contract.json"
+KERNEL_BOOTARGS_PATCH="$REPO_ROOT/kernel/patches/0001-mips-vcoreiii-accept-uboot-bootargs.patch"
 
 UI_REPO_URL="${UI_REPO_URL:-https://github.com/Gadorach/postmerkos-ui.git}"
 UI_REF="${UI_REF:-ms42p-dev}"

@@ -67,7 +67,10 @@ linked at `0x86c00000` and reuses PMOSREC v3 transport without linking any SPI
 NOR erase or program implementation. It receives an unchanged, manifest-bound
 16 MiB retail postmerkOS image, verifies and extracts the SPIM kernel to
 `0x81000000`, copies the SquashFS payload to reserved RAM at `0x87000000`, and
-boots Linux with a legacy MIPS external-initrd handoff and `mem=120M`.
+boots Linux with the standard 32-bit MIPS/U-Boot `argc`/`argv`/`envp`
+convention, a legacy external-initrd handoff, and `mem=120M`. The patched
+VCore-III PROM parser prefers valid firmware arguments and uses the existing
+compiled SPI-flash command line only when an old loader supplies none.
 The boot argument workspace is confined to physical `0x400-0xfff` through the
 uncached `0xa0000400` alias; physical 112-120 MiB remains visible to Linux for
 the initrd, while only the top 8 MiB is excluded.
@@ -116,8 +119,10 @@ development, but normal operator testing should use `firmware-flasher.sh`.
 cycle, can fall back to uploading the supplied PMOSLIVE payload through menu
 option 1. `dry-run` stops after image parsing. `boot` requires the
 non-destructive target challenge `BOOTRAM <nonce>` and restores UART to 115200
-before entering Linux. Persistent firmware update and factory-reset helpers
-reject writes when `postmerkos.live=1` is present.
+before entering Linux. Success is reported only after the kernel accepts the
+firmware vector, reserves the initrd, mounts a non-MTD SquashFS root, and live
+userspace confirms a tmpfs overlay. Persistent firmware update and
+factory-reset helpers reject writes when `postmerkos.live=1` is present.
 
 ## PMOSREC v3 sequence
 

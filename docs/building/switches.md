@@ -41,6 +41,28 @@ source project also exposes `permissive` for diagnostics; release images should
 normally use `development` during bring-up or `strict` after validation. The
 builder keeps the UART recovery menu enabled for every selected policy.
 
+## Kernel source patch and build contract
+
+The pinned switch source is selected cleanly first, then
+`scripts/apply-kernel-patches.sh` applies the repository-managed VCore-III
+standard MIPS/U-Boot argument patch. The patch is reversed before source refresh
+so the authoritative checkout can still be validated exactly. The kernel build
+uses firmware arguments when present and retains the historical SPI-flash
+command line only as a no-arguments fallback.
+
+Every successful kernel build writes
+`artifacts/kernel/pmoslive-kernel-contract.json`. It binds the source revision,
+managed patch, config policy, resolved required options, `vmlinuz`,
+`vmlinuz.bin`, and the kernel-header archive. Cached kernel output is reused only
+when that record verifies.
+
+After upgrading from a pre-contract builder, force a complete kernel and rootfs
+rebuild:
+
+```sh
+REBUILD_KERNEL=1 CLEAN_KERNEL=1 CLEAN_BUILDROOT=1 make web
+```
+
 ## Kernel image generation
 
 The selected meraki-redboot checkout supplies `tools/mkvcoreiii_payload.py`.

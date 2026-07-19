@@ -29,9 +29,14 @@ loader bodies copy that shared source-built stage to `0xa7f00000`.
 
 ## Required retail-kernel features
 
-The builder enforces built-in legacy initrd/RAM-disk and SquashFS-XZ support:
+The builder applies the managed VCore-III kernel patch and enforces standard
+MIPS/U-Boot firmware arguments, built-in legacy initrd/RAM-disk support, and
+SquashFS-XZ support:
 
 ```text
+CONFIG_CMDLINE_BOOL=y
+# CONFIG_CMDLINE_OVERRIDE is not set
+CONFIG_CMDLINE_FALLBACK=y
 CONFIG_BLOCK=y
 CONFIG_BLK_DEV=y
 CONFIG_BLK_DEV_INITRD=y
@@ -45,9 +50,21 @@ CONFIG_XZ_DEC=y
 CONFIG_DECOMPRESS_XZ=y
 ```
 
-At boot, the normal SquashFS is supplied as `/dev/ram0`. Early userspace sees
-`postmerkos.live=1`, mounts the writable overlay on tmpfs, and does not mount the
-persistent JFFS2 overlay.
+The VCore-III PROM path imports the standard 32-bit MIPS `a0=argc`, `a1=argv`,
+`a2=envp`, `a3=extra` convention used by U-Boot. Command-line arguments are
+preferred whenever a valid vector is supplied. U-Boot legacy environment keys
+`memsize`, `initrd_start`, and `initrd_size` are normalized into `mem=`,
+`rd_start=`, and `rd_size=` when those arguments are absent. When an old
+RedBoot supplies no usable vector, the existing compiled SPI-flash command line
+is used as a fallback; it is never appended after valid firmware arguments.
+
+At live boot, the normal SquashFS is supplied as `/dev/ram0`. Early userspace
+sees `postmerkos.live=1`, mounts the writable overlay on tmpfs, does not mount
+the persistent JFFS2 overlay, and emits:
+
+```text
+PMOSLIVE USERSPACE-READY ROOT=ram0 OVERLAY=tmpfs FLASH_MOUNTED=0
+```
 
 ## Safety boundary
 
@@ -60,8 +77,11 @@ trusted code.
 ## Main firmware-flasher integration
 
 PMOSLIVE is exposed by the normal firmware utility, both interactively and by
-command line. The utility labels manifest-aware full images as `manifest+live`
-when they declare the complete PMOSLIVE contract.
+command line. The utility labels manifest-aware full images as `manifest+live` only when they
+declare the complete PMOSLIVE contract **and** the packaged SPIM payload is
+bound to a verified kernel build record for the standard MIPS/U-Boot argument
+patch. Older images remain valid for ordinary flashing but are not offered for
+live boot.
 
 ```sh
 # Host-only strict capability validation.
@@ -100,7 +120,12 @@ accept otherwise valid non-live images.
 The integrated serial interpreter handles the new boot-menu choice, PMOSRAM2
 payload upload where selected, PMOSLIVE readiness and RAM-map records, PMOSREC
 v3 manifest/image transfer, the non-destructive `BOOTRAM <nonce>` challenge,
-UART restoration to 115200, and detection of the first Linux banner.
+UART restoration to 115200, and strict proof of the complete Linux handoff. A
+Linux banner alone is not success. The interpreter requires VCore-III argv
+acceptance, firmware command-line selection, initrd reservation, the complete
+live command line, a non-MTD SquashFS root mount, and the userspace attestation
+above. It rejects the observed failure signatures `Initrd not found or empty`,
+`root=/dev/mtdblock3`, `mem=134152192`, and root device `31:3`.
 
 ## Validation and first test
 
@@ -110,4 +135,19 @@ loader/firmware.
 
 The first hardware run can add `--skip-baud-negotiation` if maximum simplicity
 is preferred. After a successful dry run at 115200, repeat with the normal
-adaptive baud path.
+adaptive baud path. A successful boot must include at least:
+
+```text
+VCOREIII PROM ARGV-ACCEPTED ...
+MIPS CMDLINE-SOURCE=firmware
+Kernel command line: ... mem=120M ... root=/dev/ram0 ... postmerkos.live=1
+Initial ramdisk at: ...
+VFS: Mounted root (squashfs filesystem) ...
+PMOSLIVE USERSPACE-READY ROOT=ram0 OVERLAY=tmpfs FLASH_MOUNTED=0
+```
+
+Kernel artifacts are reusable only when
+`artifacts/kernel/pmoslive-kernel-contract.json` verifies the source revision,
+managed patch, config policy, and hashes of `vmlinuz`, `vmlinuz.bin`, and the
+kernel-header archive. The release-manifest writer also verifies that the SPIM
+payload matches this record before publishing live capability.

@@ -475,6 +475,19 @@ def _liveboot_payload_record(manifest: dict, model: str) -> dict:
         raise ProtocolError("manifest UART liveboot integrity contract is incompatible")
     if liveboot.get("linux_handoff") != "mips-legacy-argc-argv-envp-external-initrd-v1":
         raise ProtocolError("manifest UART liveboot Linux handoff is incompatible")
+    if liveboot.get("kernel_boot_argument_contract") != "vcoreiii-standard-mips-argc-argv-envp-fallback-v1":
+        raise ProtocolError(
+            "manifest kernel does not declare standard VCore-III MIPS/U-Boot argument support; "
+            "ordinary flashing remains available, but live boot requires a rebuilt kernel"
+        )
+    kernel_payload = manifest.get("artifact", {}).get("kernel_payload", {})
+    if kernel_payload.get("boot_argument_contract") != "vcoreiii-standard-mips-argc-argv-envp-fallback-v1":
+        raise ProtocolError(
+            "manifest artifact is not bound to a PMOSLIVE-compatible kernel build; "
+            "ordinary flashing remains available, but live boot requires a rebuilt kernel"
+        )
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", str(kernel_payload.get("build_contract_sha256", ""))):
+        raise ProtocolError("manifest kernel build-contract digest is missing or invalid")
     if liveboot.get("rootfs_handoff") != "squashfs-as-legacy-initrd-v1":
         raise ProtocolError("manifest UART liveboot rootfs handoff is incompatible")
     payloads = liveboot.get("payloads")
@@ -500,6 +513,8 @@ def _liveboot_payload_record(manifest: dict, model: str) -> dict:
         raise ProtocolError("manifest PMOSLIVE payload transport contract is incompatible")
     if record.get("linux_handoff") != "mips-legacy-argc-argv-envp-external-initrd-v1":
         raise ProtocolError("manifest PMOSLIVE payload Linux handoff is incompatible")
+    if record.get("kernel_boot_argument_contract") != "vcoreiii-standard-mips-argc-argv-envp-fallback-v1":
+        raise ProtocolError("manifest PMOSLIVE payload is not bound to the U-Boot-compatible kernel contract")
     if record.get("rootfs_handoff") != "squashfs-as-legacy-initrd-v1":
         raise ProtocolError("manifest PMOSLIVE payload rootfs handoff is incompatible")
     expected_ram = {

@@ -60,7 +60,8 @@ Live capability is a separate, stricter contract. Images without
 bootloader recovery flashing; only a requested PMOSLIVE operation rejects them.
 The serial runner understands menu option 3, menu-option-1 payload upload,
 PMOSREC v3 image transfer, `BOOTRAM <nonce>`, UART restoration to 115200, and
-the first Linux banner.
+strict kernel and userspace evidence that the transferred RAM root is active.
+A generic Linux banner or normal postmerkOS console is not accepted as live-boot success.
 
 See [`PMOSLIVE.md`](PMOSLIVE.md) for the RAM map and safety boundary.
 

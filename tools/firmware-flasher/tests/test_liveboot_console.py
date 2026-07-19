@@ -141,7 +141,20 @@ class LivebootConsoleTests(unittest.TestCase):
             "PMOSLIVE UART-RESTORE RATE=115200 FROM=921600",
             "PMOSLIVE UART-BASELINE-READY RATE=115200",
             "PMOSLIVE EXEC ENTRY=81000000",
-            "Linux version 3.18.123-test",
+        ]
+        link.read_line.side_effect = [
+            "[    0.000000] Linux version 3.18.123-test",
+            "[    0.000000] VCOREIII PROM FWARGS a0=0000000d a1=a0000400 a2=a0000600 a3=00000000",
+            "[    0.000000] VCOREIII PROM ARGV-ACCEPTED argc=12 envc=3",
+            "[    0.000000] MIPS CMDLINE-SOURCE=firmware",
+            "[    0.000000] Initial ramdisk at: 0x87000000 (8269824 bytes)",
+            (
+                "[    0.000000] Kernel command line: console=ttyS0,115200 mem=120M "
+                "rd_start=0x87000000 rd_size=0x007e3000 root=/dev/ram0 "
+                "rootfstype=squashfs postmerkos.live=1"
+            ),
+            "[    2.000000] VFS: Mounted root (squashfs filesystem) readonly on device 1:0.",
+            "PMOSLIVE USERSPACE-READY ROOT=ram0 OVERLAY=tmpfs FLASH_MOUNTED=0",
         ]
         selection = pv3.TransportSelection(921600, 4096, 1, True, True, True)
         plan = pv3.RepresentationPlan(pv3.REP_RAW, 4096, ())
@@ -155,11 +168,55 @@ class LivebootConsoleTests(unittest.TestCase):
                 link, bundle, selection, dry_run=False, force=False,
                 baud_controller=controller,
             )
-        self.assertEqual(result, "Linux version 3.18.123-test")
+        self.assertEqual(
+            result,
+            "PMOSLIVE USERSPACE-READY ROOT=ram0 OVERLAY=tmpfs FLASH_MOUNTED=0",
+        )
         self.assertIn(mock.call(b"PMOS3 LIVEBOOT\n"), link.write_all.call_args_list)
         self.assertIn(mock.call(b"BOOTRAM deadbeef\n"), link.write_all.call_args_list)
         controller.set_rate.assert_called_once_with(115200, flush=True)
         self.assertEqual(link.buffer, bytearray())
+
+
+    def test_liveboot_rejects_the_observed_flash_root_fallback(self) -> None:
+        link = mock.Mock()
+        link.read_line.side_effect = [
+            "[    0.000000] Linux version 3.18.123-meraki-elemental",
+            "[    0.000000] VCOREIII PROM ARGV-ABSENT builtin fallback eligible",
+            "[    0.000000] Initrd not found or empty - disabling initrd",
+            (
+                "[    0.000000] Kernel command line: console=ttyS0,115200 "
+                "root=/dev/mtdblock3 mem=134152192"
+            ),
+        ]
+        with self.assertRaisesRegex(pv3.ProtocolError, "did not accept argc/argv/envp"):
+            pv3.wait_for_liveboot_success(link, 30.0)
+
+    def test_liveboot_rejects_flash_mtd_root_even_after_a_valid_cmdline_marker(self) -> None:
+        link = mock.Mock()
+        link.read_line.side_effect = [
+            "VCOREIII PROM ARGV-ACCEPTED argc=12 envc=3",
+            "MIPS CMDLINE-SOURCE=firmware",
+            "Initial ramdisk at: 0x87000000 (8269824 bytes)",
+            (
+                "Kernel command line: mem=120M rd_start=0x87000000 rd_size=0x7e3000 "
+                "root=/dev/ram0 rootfstype=squashfs postmerkos.live=1"
+            ),
+            "VFS: Mounted root (squashfs filesystem) readonly on device 31:3.",
+        ]
+        with self.assertRaisesRegex(pv3.ProtocolError, "SPI-flash SquashFS"):
+            pv3.wait_for_liveboot_success(link, 30.0)
+
+    def test_liveboot_rejects_incomplete_firmware_command_line(self) -> None:
+        link = mock.Mock()
+        link.read_line.side_effect = [
+            "VCOREIII PROM ARGV-ACCEPTED argc=4 envc=0",
+            "MIPS CMDLINE-SOURCE=firmware",
+            "Initial ramdisk at: 0x87000000 (8269824 bytes)",
+            "Kernel command line: console=ttyS0,115200 root=/dev/ram0",
+        ]
+        with self.assertRaisesRegex(pv3.ProtocolError, "live command line is missing"):
+            pv3.wait_for_liveboot_success(link, 30.0)
 
 
 if __name__ == "__main__":

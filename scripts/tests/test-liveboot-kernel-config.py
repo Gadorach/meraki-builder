@@ -8,6 +8,9 @@ tool = root / "scripts" / "configure-liveboot-kernel.py"
 with tempfile.TemporaryDirectory() as directory:
     config = Path(directory) / ".config"
     config.write_text(
+        "CONFIG_CMDLINE_BOOL=y\n"
+        "CONFIG_CMDLINE_OVERRIDE=y\n"
+        "# CONFIG_CMDLINE_FALLBACK is not set\n"
         "# CONFIG_BLOCK is not set\n"
         "# CONFIG_BLK_DEV is not set\n"
         "CONFIG_BLK_DEV_INITRD=n\n"
@@ -22,6 +25,9 @@ with tempfile.TemporaryDirectory() as directory:
     subprocess.run([str(tool), "--config", str(config), "--verify"], check=True)
     result = config.read_text(encoding="utf-8")
     assert "CONFIG_UNRELATED=y" in result
+    assert "CONFIG_CMDLINE_BOOL=y" in result
+    assert "CONFIG_CMDLINE_OVERRIDE=n" in result
+    assert "CONFIG_CMDLINE_FALLBACK=y" in result
     assert result.count("CONFIG_BLOCK=") == 1
     assert "CONFIG_BLOCK=y" in result
     assert result.count("CONFIG_BLK_DEV=") == 1

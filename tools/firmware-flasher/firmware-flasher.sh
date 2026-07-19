@@ -329,6 +329,15 @@ if not isinstance(record, dict) or record.get("accepted_models") != ["MS42", "MS
     raise SystemExit(1)
 if record.get("linux_handoff") != "mips-legacy-argc-argv-envp-external-initrd-v1":
     raise SystemExit(1)
+if live.get("kernel_boot_argument_contract") != "vcoreiii-standard-mips-argc-argv-envp-fallback-v1":
+    raise SystemExit(1)
+kernel_payload = manifest.get("artifact", {}).get("kernel_payload", {})
+if kernel_payload.get("boot_argument_contract") != "vcoreiii-standard-mips-argc-argv-envp-fallback-v1":
+    raise SystemExit(1)
+if len(str(kernel_payload.get("build_contract_sha256", ""))) != 64:
+    raise SystemExit(1)
+if record.get("kernel_boot_argument_contract") != "vcoreiii-standard-mips-argc-argv-envp-fallback-v1":
+    raise SystemExit(1)
 if record.get("rootfs_handoff") != "squashfs-as-legacy-initrd-v1":
     raise SystemExit(1)
 PY_LIVE_CAP

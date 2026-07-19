@@ -13,6 +13,13 @@ marker = root / "buildroot/features/web-overlay/etc/postmerkos/features/web-ui"
 configd_dir = root / "buildroot/packages/configd"
 
 assert build_all.count('CLEAN_BUILDROOT="${CLEAN_BUILDROOT:-0}"') >= 2
+for token in (
+    'kernel-build-contract.py" verify',
+    'Existing kernel artifacts do not satisfy the current PMOSLIVE boot-argument contract',
+    'Reusing verified PMOSLIVE-compatible kernel artifacts',
+):
+    assert token in build_all, token
+
 for variable in ("REBUILD_KERNEL", "REBUILD_LOADER", "CLEAN_KERNEL", "LOADER_REPO_URL", "LOADER_REF"):
     token = f'{variable}="${{{variable}:-'
     assert build_all.count(token) >= 2, f"Distrobox handoff does not preserve {variable}"

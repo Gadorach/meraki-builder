@@ -250,6 +250,41 @@ class ArtifactManifestTests(unittest.TestCase):
         self.loader_version.write_text("0.7.0\n")
         self.loader_revision = self.root / "loader.revision"
         self.loader_revision.write_text("fixture-revision\n")
+        self.kernel_contract = self.root / "pmoslive-kernel-contract.json"
+        required_config = {
+            "CONFIG_BLOCK": "y",
+            "CONFIG_BLK_DEV": "y",
+            "CONFIG_BLK_DEV_INITRD": "y",
+            "CONFIG_BLK_DEV_RAM": "y",
+            "CONFIG_BLK_DEV_RAM_COUNT": "1",
+            "CONFIG_BLK_DEV_RAM_SIZE": "16384",
+            "CONFIG_RD_XZ": "y",
+            "CONFIG_SQUASHFS": "y",
+            "CONFIG_SQUASHFS_XZ": "y",
+            "CONFIG_XZ_DEC": "y",
+            "CONFIG_DECOMPRESS_XZ": "y",
+            "CONFIG_CMDLINE_BOOL": "y",
+            "CONFIG_CMDLINE_OVERRIDE": "n",
+            "CONFIG_CMDLINE_FALLBACK": "y",
+        }
+        self.kernel_contract.write_text(json.dumps({
+            "format": "postmerkos.kernel-build-contract.v1",
+            "kernel_version": "3.18.123",
+            "boot_argument_contract": "vcoreiii-standard-mips-argc-argv-envp-fallback-v1",
+            "source_revision": "fixture-kernel-revision",
+            "managed_patch": {"filename": "fixture.patch", "sha256": "0" * 64},
+            "config_policy": {
+                "filename": "configure-liveboot-kernel.py",
+                "sha256": "1" * 64,
+                "required": dict(sorted(required_config.items())),
+            },
+            "resolved_config": dict(sorted(required_config.items())),
+            "artifacts": {
+                "vmlinuz": {"filename": "vmlinuz", "bytes": len(kernel), "sha256": hashlib.sha256(kernel).hexdigest()},
+                "vmlinuz_bin": {"filename": "vmlinuz.bin", "bytes": len(kernel), "sha256": hashlib.sha256(kernel).hexdigest()},
+                "headers": {"filename": "linux-3.18.123.tar.bz2", "bytes": 1, "sha256": "2" * 64},
+            },
+        }, indent=2, sort_keys=True) + "\n")
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -259,7 +294,7 @@ class ArtifactManifestTests(unittest.TestCase):
             [
                 sys.executable, str(SCRIPT), str(self.source), str(self.output),
                 str(self.image), str(self.rootfs), str(self.loader_manifest), str(self.recovery),
-                str(self.liveboot),
+                str(self.liveboot), str(self.kernel_contract),
                 str(self.loader_version), str(self.loader_revision),
             ],
             text=True,
@@ -286,6 +321,10 @@ class ArtifactManifestTests(unittest.TestCase):
         self.assertEqual(loader["stage1_storage_contract"], "single-shared-boot-region-blob-v1")
         self.assertEqual(manifest["artifact"]["bootloader"]["version"], "0.7.0")
         self.assertEqual(manifest["artifact"]["kernel_payload"]["alignment_bytes"], 32)
+        self.assertEqual(
+            manifest["artifact"]["kernel_payload"]["boot_argument_contract"],
+            "vcoreiii-standard-mips-argc-argv-envp-fallback-v1",
+        )
         firmware = manifest["recovery"]["uart_firmware"]
         self.assertEqual(firmware["flash_geometry"], GEOMETRY)
         self.assertEqual(firmware["accepted_jedec_ids"], JEDEC)
@@ -366,6 +405,15 @@ class ArtifactManifestTests(unittest.TestCase):
         descriptor_path.write_text(json.dumps(descriptor, indent=2) + "\n")
         result = self.run_finalizer(expect_success=False)
         self.assertIn("embedded target descriptor mismatch", result.stderr)
+
+
+    def test_stale_kernel_contract_is_rejected(self) -> None:
+        contract = json.loads(self.kernel_contract.read_text())
+        contract["artifacts"]["vmlinuz_bin"]["sha256"] = "f" * 64
+        self.kernel_contract.write_text(json.dumps(contract, indent=2) + "\n")
+        result = self.run_finalizer(expect_success=False)
+        self.assertIn("does not match", result.stderr)
+
 
 
 if __name__ == "__main__":

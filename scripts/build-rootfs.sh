@@ -195,6 +195,7 @@ if [[ -f "$release_manifest" ]]; then
     "$LOADER_MANIFEST" \
     "$RECOVERY_ARTIFACT_DIR" \
     "$LIVEBOOT_ARTIFACT_DIR" \
+    "$KERNEL_BUILD_CONTRACT_RECORD" \
     "$LOADER_SOURCE_VERSION_FILE" \
     "$LOADER_SOURCE_REVISION_FILE"
   write_sha256_sidecar "$ARTIFACTS_DIR/$name.manifest.json"

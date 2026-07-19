@@ -1,8 +1,0 @@
-Project: meraki-builder
-Release: pmoslive-mem120-flasher-integration1
-Date: 2026-07-19
-Source tree: complete working tree without .git metadata or generated caches
-Base: pmoslive-mem120-buildfix1
-Primary interface: tools/firmware-flasher/firmware-flasher.sh
-Integration report: docs/development/pmoslive-firmware-flasher-integration-2026-07-19.md
-Memory contract: PMOSLIVE-MEMORY-MAP.md

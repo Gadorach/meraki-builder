@@ -16,6 +16,24 @@ ROOTFS_BYTES = 0x800000
 OVERLAY_BYTES = 0x500000
 TOTAL_BYTES = 0x1000000
 BOOT_CHAIN = "vcoreiii-linuxloader-spim-v2"
+KERNEL_CONTRACT_FORMAT = "postmerkos.kernel-build-contract.v1"
+KERNEL_BOOT_ARGUMENT_CONTRACT = "vcoreiii-standard-mips-argc-argv-envp-fallback-v1"
+REQUIRED_KERNEL_CONFIG = {
+    "CONFIG_BLOCK": "y",
+    "CONFIG_BLK_DEV": "y",
+    "CONFIG_BLK_DEV_INITRD": "y",
+    "CONFIG_BLK_DEV_RAM": "y",
+    "CONFIG_BLK_DEV_RAM_COUNT": "1",
+    "CONFIG_BLK_DEV_RAM_SIZE": "16384",
+    "CONFIG_RD_XZ": "y",
+    "CONFIG_SQUASHFS": "y",
+    "CONFIG_SQUASHFS_XZ": "y",
+    "CONFIG_XZ_DEC": "y",
+    "CONFIG_DECOMPRESS_XZ": "y",
+    "CONFIG_CMDLINE_BOOL": "y",
+    "CONFIG_CMDLINE_OVERRIDE": "n",
+    "CONFIG_CMDLINE_FALLBACK": "y",
+}
 SPIM_HEADER = struct.Struct("<8I")
 SPIM_MAGIC = 0x4D495053
 
@@ -29,21 +47,26 @@ def sha256(path: Path) -> str:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) not in (8, 10):
+    if len(argv) not in (9, 11):
         print(
             "usage: write-artifact-manifest.py INPUT.json OUTPUT.json IMAGE ROOTFS "
             "LOADER-MANIFEST.json RECOVERY-ARTIFACT-DIR LIVEBOOT-ARTIFACT-DIR "
-            "[LOADER-VERSION LOADER-REVISION]",
+            "KERNEL-CONTRACT.json [LOADER-VERSION LOADER-REVISION]",
             file=sys.stderr,
         )
         return 2
-    source, output, image, rootfs, loader_manifest_path, recovery_dir, liveboot_dir = map(Path, argv[1:8])
-    loader_version_path = Path(argv[8]) if len(argv) == 10 else None
-    loader_revision_path = Path(argv[9]) if len(argv) == 10 else None
+    source, output, image, rootfs, loader_manifest_path, recovery_dir, liveboot_dir, kernel_contract_path = map(Path, argv[1:9])
+    loader_version_path = Path(argv[9]) if len(argv) == 11 else None
+    loader_revision_path = Path(argv[10]) if len(argv) == 11 else None
     manifest = json.loads(source.read_text(encoding="utf-8"))
     loader_manifest = json.loads(loader_manifest_path.read_text(encoding="utf-8"))
+    if not kernel_contract_path.is_file():
+        raise SystemExit(f"PMOSLIVE kernel build contract is missing: {kernel_contract_path}")
+    kernel_contract = json.loads(kernel_contract_path.read_text(encoding="utf-8"))
     if not isinstance(manifest, dict) or not isinstance(loader_manifest, dict):
         raise SystemExit("release and loader manifests must contain JSON objects")
+    if not isinstance(kernel_contract, dict):
+        raise SystemExit("kernel build contract must contain a JSON object")
     for path in (image, rootfs):
         if not path.is_file():
             raise SystemExit(f"required artifact is missing: {path}")
@@ -80,6 +103,20 @@ def main(argv: list[str]) -> int:
     if (r0, r1, r2) != (0, 0, 0):
         raise SystemExit("published image SPIM reserved words are non-zero")
     payload = image_data[LOADER_BYTES + SPIM_HEADER.size:LOADER_BYTES + SPIM_HEADER.size + payload_size]
+    if kernel_contract.get("format") != KERNEL_CONTRACT_FORMAT:
+        raise SystemExit("PMOSLIVE kernel build contract format mismatch")
+    if kernel_contract.get("boot_argument_contract") != KERNEL_BOOT_ARGUMENT_CONTRACT:
+        raise SystemExit("PMOSLIVE kernel boot-argument contract mismatch")
+    if kernel_contract.get("resolved_config") != dict(sorted(REQUIRED_KERNEL_CONFIG.items())):
+        raise SystemExit("PMOSLIVE kernel build contract configuration mismatch")
+    vmlinuz_bin_record = kernel_contract.get("artifacts", {}).get("vmlinuz_bin", {})
+    built_kernel_bytes = int(vmlinuz_bin_record.get("bytes", 0) or 0)
+    if not 0 < built_kernel_bytes <= len(payload):
+        raise SystemExit("PMOSLIVE kernel contract has an invalid vmlinuz.bin size")
+    if hashlib.sha256(payload[:built_kernel_bytes]).hexdigest() != str(vmlinuz_bin_record.get("sha256", "")).lower():
+        raise SystemExit("published image kernel does not match the PMOSLIVE-compatible kernel build contract")
+    if any(payload[built_kernel_bytes:]):
+        raise SystemExit("published image kernel alignment padding is not zero-filled")
     zeroed_header = bytearray(header)
     struct.pack_into("<I", zeroed_header, 16, 0)
     calculated_crc = zlib.crc32(zeroed_header + payload) & 0xFFFFFFFF
@@ -326,6 +363,7 @@ def main(argv: list[str]) -> int:
         "flash_access": "none",
         "transport_contract": "pmosrec-v3-adaptive-uart-sparse-lz4-v1",
         "linux_handoff": "mips-legacy-argc-argv-envp-external-initrd-v1",
+        "kernel_boot_argument_contract": "vcoreiii-standard-mips-argc-argv-envp-fallback-v1",
         "rootfs_handoff": "squashfs-as-legacy-initrd-v1",
         "ram_layout": expected_live_ram,
     }
@@ -416,6 +454,7 @@ def main(argv: list[str]) -> int:
             "transport_contract": "pmosrec-v3-adaptive-uart-sparse-lz4-v1",
             "transport_integrity": ["frame-crc32", "compact-ack-crc32", "object-crc32", "object-sha256", "reconstructed-image-sha256"],
             "linux_handoff": "mips-legacy-argc-argv-envp-external-initrd-v1",
+            "kernel_boot_argument_contract": "vcoreiii-standard-mips-argc-argv-envp-fallback-v1",
             "rootfs_handoff": "squashfs-as-legacy-initrd-v1",
             "payloads": {"jaguar1": live_payload},
         },
@@ -444,6 +483,9 @@ def main(argv: list[str]) -> int:
         },
         "kernel_payload": {
             "format": "postmerkos.vcoreiii-payload.v1",
+            "boot_argument_contract": KERNEL_BOOT_ARGUMENT_CONTRACT,
+            "source_revision": kernel_contract.get("source_revision"),
+            "build_contract_sha256": sha256(kernel_contract_path),
             "header_bytes": SPIM_HEADER.size,
             "payload_bytes": payload_size,
             "alignment_bytes": 32,

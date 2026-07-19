@@ -24,6 +24,9 @@ run_logged openwrt-build make -j"${OPENWRT_JOBS:-1}" \
   BOARD=elemental-3.18 OPENWRT_EXTRA_BOARD_SUFFIX=_3.18
 [[ -x "${CROSS_COMPILE}gcc" ]] || die "Cross-compiler was not produced at ${CROSS_COMPILE}gcc"
 
+log "Applying standard MIPS/U-Boot boot-argument support"
+"$SCRIPT_DIR/apply-kernel-patches.sh"
+
 log "Building Linux 3.18 compressed vmlinuz"
 cd "$KERNEL_DIR"
 if bool_enabled "${CLEAN_KERNEL:-0}"; then
@@ -50,5 +53,14 @@ tar -C "$SWITCH_DIR" -cjf "$KERNEL_HEADERS_TARBALL" \
 
 sha256sum "$KERNEL_ARTIFACT_DIR/vmlinuz" "$KERNEL_ARTIFACT_DIR/vmlinuz.bin" \
   "$KERNEL_HEADERS_TARBALL" > "$KERNEL_ARTIFACT_DIR/SHA256SUMS"
+python3 "$SCRIPT_DIR/kernel-build-contract.py" write \
+  --record "$KERNEL_BUILD_CONTRACT_RECORD" \
+  --source-revision-file "$ARTIFACTS_DIR/kernel-source-revision.txt" \
+  --patch "$KERNEL_BOOTARGS_PATCH" \
+  --config-policy "$SCRIPT_DIR/configure-liveboot-kernel.py" \
+  --config "$KERNEL_DIR/.config" \
+  --vmlinuz "$KERNEL_ARTIFACT_DIR/vmlinuz" \
+  --vmlinuz-bin "$KERNEL_ARTIFACT_DIR/vmlinuz.bin" \
+  --headers "$KERNEL_HEADERS_TARBALL"
 touch "$STAMP_DIR/kernel-built"
 log "Kernel artifacts are ready in $KERNEL_ARTIFACT_DIR"

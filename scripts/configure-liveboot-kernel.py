@@ -12,6 +12,12 @@ from pathlib import Path
 import re
 
 REQUIRED = {
+    # Preserve the standard MIPS argc/argv/envp handoff. The platform's
+    # historical flash command line remains available only when the loader
+    # supplies no valid arguments (old RedBoot behavior).
+    "CONFIG_CMDLINE_BOOL": "y",
+    "CONFIG_CMDLINE_OVERRIDE": "n",
+    "CONFIG_CMDLINE_FALLBACK": "y",
     # msxx_defconfig disables the parent block-device menu. Kconfig removes
     # BLK_DEV_RAM and its numeric children unless both parents are enabled
     # before olddefconfig resolves dependencies.

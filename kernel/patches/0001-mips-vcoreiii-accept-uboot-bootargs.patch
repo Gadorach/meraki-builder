@@ -1,0 +1,281 @@
+--- a/linux-3.18/arch/mips/Kconfig.debug
++++ b/linux-3.18/arch/mips/Kconfig.debug
+@@ -79,6 +79,19 @@
+ 
+ 	  Normally, you will choose 'N' here.
+ 
++config CMDLINE_FALLBACK
++	bool "Use built-in command line only when firmware provides none"
++	default n
++	depends on CMDLINE_BOOL && !CMDLINE_OVERRIDE
++	help
++	  Select this when the platform must retain a built-in command line for
++	  legacy bootloaders, but should prefer a valid command line supplied by
++	  firmware or a second-stage bootloader.  Unlike the normal append mode,
++	  the built-in string is not concatenated after firmware arguments, so
++	  fallback root= and mem= settings cannot override U-Boot parameters.
++
++	  This is useful while migrating a system from a legacy loader to U-Boot.
++
+ config SB1XXX_CORELIS
+ 	bool "Corelis Debugger"
+ 	depends on SIBYTE_SB1xxx_SOC
+--- a/linux-3.18/arch/mips/kernel/setup.c
++++ b/linux-3.18/arch/mips/kernel/setup.c
+@@ -639,17 +639,28 @@
+ 	print_memory_map();
+ 
+ #ifdef CONFIG_CMDLINE_BOOL
+-#ifdef CONFIG_CMDLINE_OVERRIDE
++#if defined(CONFIG_CMDLINE_OVERRIDE)
+ 	strlcpy(boot_command_line, builtin_cmdline, COMMAND_LINE_SIZE);
++	pr_info("MIPS CMDLINE-SOURCE=builtin-override\n");
++#elif defined(CONFIG_CMDLINE_FALLBACK)
++	if (arcs_cmdline[0]) {
++		strlcpy(boot_command_line, arcs_cmdline, COMMAND_LINE_SIZE);
++		pr_info("MIPS CMDLINE-SOURCE=firmware\n");
++	} else {
++		strlcpy(boot_command_line, builtin_cmdline, COMMAND_LINE_SIZE);
++		pr_info("MIPS CMDLINE-SOURCE=builtin-fallback\n");
++	}
+ #else
+ 	if (builtin_cmdline[0]) {
+ 		strlcat(arcs_cmdline, " ", COMMAND_LINE_SIZE);
+ 		strlcat(arcs_cmdline, builtin_cmdline, COMMAND_LINE_SIZE);
+ 	}
+ 	strlcpy(boot_command_line, arcs_cmdline, COMMAND_LINE_SIZE);
++	pr_info("MIPS CMDLINE-SOURCE=firmware-plus-builtin\n");
+ #endif
+ #else
+ 	strlcpy(boot_command_line, arcs_cmdline, COMMAND_LINE_SIZE);
++	pr_info("MIPS CMDLINE-SOURCE=firmware\n");
+ #endif
+ 	strlcpy(command_line, boot_command_line, COMMAND_LINE_SIZE);
+ 
+--- a/linux-3.18/arch/mips/configs/msxx_defconfig
++++ b/linux-3.18/arch/mips/configs/msxx_defconfig
+@@ -1637,7 +1637,8 @@
+ CONFIG_EARLY_PRINTK=y
+ CONFIG_CMDLINE_BOOL=y
+ CONFIG_CMDLINE="console=ttyS0,115200 mtdparts=m25p80:0x40000(redboot),0x2c0000(kernel),0x800000(squashfs),0x500000(config) root=/dev/mtdblock3 ubi.mtd=gen_nand.0 mem=134152192"
+-CONFIG_CMDLINE_OVERRIDE=y
++# CONFIG_CMDLINE_OVERRIDE is not set
++CONFIG_CMDLINE_FALLBACK=y
+ # CONFIG_RUNTIME_DEBUG is not set
+ # CONFIG_DEBUG_ZBOOT is not set
+ # CONFIG_SPINLOCK_TEST is not set
+--- a/linux-3.18/arch/mips/vcoreiii/vcoreiii_prom.c
++++ b/linux-3.18/arch/mips/vcoreiii/vcoreiii_prom.c
+@@ -31,6 +31,8 @@
+ #include <linux/ioport.h>
+ #include <linux/vmalloc.h>
+ #include <linux/delay.h>
++#include <linux/kernel.h>
++#include <linux/string.h>
+ 
+ #include <asm/addrspace.h>
+ #include <asm/bootinfo.h>
+@@ -76,22 +78,171 @@
+ }
+ 
+ #if !defined(CONFIG_CMDLINE_OVERRIDE)
+-static void __init prom_init_cmdline(void)                           
+-{                                                                    
+-        int argc = fw_arg0;                                          
+-        char **argv = (char **) KSEG0ADDR(fw_arg1);                  
+-        int i;                                                       
+-                                                                     
+-        arcs_cmdline[0] = '\0';                                      
+-                                                                     
+-        for (i = 0; i < argc; i++) {                                 
+-                char *p = (char *) KSEG0ADDR(argv[i]);               
+-                                                                     
+-                if (CPHYSADDR(p) && *p) {                            
+-                        strlcat(arcs_cmdline, p, sizeof(arcs_cmdline));
+-                        strlcat(arcs_cmdline, " ", sizeof(arcs_cmdline));
+-                }                                                        
+-        }                                                                
++#define VCOREIII_PROM_RAM_BYTES       (128UL * 1024UL * 1024UL)
++#define VCOREIII_PROM_MAX_ARGS       64
++#define VCOREIII_PROM_MAX_ENVS       64
++#define VCOREIII_PROM_MAX_STRING     512
++
++static unsigned int __initdata prom_argc_accepted;
++static unsigned int __initdata prom_envc_accepted;
++static bool __initdata prom_firmware_cmdline;
++
++static bool __init prom_range_valid(unsigned long address, unsigned long bytes,
++                                    unsigned long alignment)
++{
++        unsigned long phys;
++
++        if (KSEGX(address) != KSEG0 && KSEGX(address) != KSEG1)
++                return false;
++        phys = CPHYSADDR(address);
++        if (!phys || phys >= VCOREIII_PROM_RAM_BYTES)
++                return false;
++        if (alignment && (phys & (alignment - 1)))
++                return false;
++        if (bytes > VCOREIII_PROM_RAM_BYTES - phys)
++                return false;
++        return true;
++}
++
++static const char *__init prom_string(unsigned long address)
++{
++        const char *value;
++
++        if (!prom_range_valid(address, VCOREIII_PROM_MAX_STRING, 1))
++                return NULL;
++        value = (const char *)KSEG0ADDR(address);
++        if (strnlen(value, VCOREIII_PROM_MAX_STRING) == VCOREIII_PROM_MAX_STRING)
++                return NULL;
++        return value;
++}
++
++static bool __init prom_cmdline_has(const char *name)
++{
++        const char *p = arcs_cmdline;
++        size_t length = strlen(name);
++
++        while (*p) {
++                while (*p == ' ')
++                        p++;
++                if (!strncmp(p, name, length) && p[length] == '=')
++                        return true;
++                while (*p && *p != ' ')
++                        p++;
++        }
++        return false;
++}
++
++static bool __init prom_append_argument(const char *argument)
++{
++        size_t old_length = strlen(arcs_cmdline);
++        size_t arg_length = strlen(argument);
++
++        if (!arg_length)
++                return false;
++        if (old_length && old_length + 1 >= COMMAND_LINE_SIZE)
++                return false;
++        if (old_length)
++                strlcat(arcs_cmdline, " ", COMMAND_LINE_SIZE);
++        strlcat(arcs_cmdline, argument, COMMAND_LINE_SIZE);
++        return strlen(arcs_cmdline) > old_length;
++}
++
++static const char *__init prom_find_environment(const char *name)
++{
++        unsigned long *envp;
++        unsigned long envp_address = fw_arg2;
++        size_t name_length = strlen(name);
++        unsigned int i;
++
++        if (!prom_range_valid(envp_address,
++                              VCOREIII_PROM_MAX_ENVS * sizeof(*envp),
++                              sizeof(*envp)))
++                return NULL;
++        envp = (unsigned long *)KSEG0ADDR(envp_address);
++
++        for (i = 0; i < VCOREIII_PROM_MAX_ENVS; i++) {
++                const char *entry;
++                unsigned long entry_address = envp[i];
++
++                if (!entry_address)
++                        break;
++                entry = prom_string(entry_address);
++                if (!entry)
++                        break;
++                prom_envc_accepted = i + 1;
++                if (!strncmp(entry, name, name_length) &&
++                    entry[name_length] == '=')
++                        return entry + name_length + 1;
++        }
++        return NULL;
++}
++
++static void __init prom_import_environment(void)
++{
++        const char *memsize;
++        const char *initrd_address;
++        const char *initrd_size;
++        char argument[48];
++        unsigned long value;
++
++        memsize = prom_find_environment("memsize");
++        if (memsize && !prom_cmdline_has("mem")) {
++                value = simple_strtoul(memsize, NULL, 0);
++                if (value) {
++                        if (value > 4096)
++                                snprintf(argument, sizeof(argument), "mem=%lu", value);
++                        else
++                                snprintf(argument, sizeof(argument), "mem=%luM", value);
++                        prom_append_argument(argument);
++                }
++        }
++
++        initrd_address = prom_find_environment("initrd_start");
++        initrd_size = prom_find_environment("initrd_size");
++        if (initrd_address && initrd_size &&
++            !prom_cmdline_has("rd_start") && !prom_cmdline_has("rd_size")) {
++                unsigned long start = simple_strtoul(initrd_address, NULL, 0);
++                unsigned long size = simple_strtoul(initrd_size, NULL, 0);
++
++                if (start && size) {
++                        snprintf(argument, sizeof(argument), "rd_start=0x%08lx",
++                                 (unsigned long)KSEG0ADDR(start));
++                        prom_append_argument(argument);
++                        snprintf(argument, sizeof(argument), "rd_size=0x%lx", size);
++                        prom_append_argument(argument);
++                }
++        }
++}
++
++static void __init prom_init_cmdline(void)
++{
++        unsigned long *argv;
++        unsigned long argv_address = fw_arg1;
++        unsigned int argc = fw_arg0;
++        unsigned int i;
++
++        arcs_cmdline[0] = '\0';
++
++        if (!argc || argc > VCOREIII_PROM_MAX_ARGS)
++                return;
++        if (!prom_range_valid(argv_address, argc * sizeof(*argv), sizeof(*argv)))
++                return;
++        argv = (unsigned long *)KSEG0ADDR(argv_address);
++
++        for (i = 0; i < argc; i++) {
++                const char *argument;
++
++                if (!argv[i])
++                        continue;
++                argument = prom_string(argv[i]);
++                if (!argument)
++                        break;
++                if (prom_append_argument(argument))
++                        prom_argc_accepted++;
++        }
++
++        prom_import_environment();
++        prom_firmware_cmdline = arcs_cmdline[0] != '\0';
+ }
+ #endif
+ 
+@@ -123,6 +274,15 @@
+ 	uart_ptr->lcr = UART_LCR_WLEN8;	/* 8 bits, no parity, 1 stop bit */
+ 	udelay(1);			 /* Let BRG settle */
+ 
++#if !defined(CONFIG_CMDLINE_OVERRIDE)
++	printk(KERN_INFO "VCOREIII PROM FWARGS a0=%08lx a1=%08lx a2=%08lx a3=%08lx\n",
++	       fw_arg0, fw_arg1, fw_arg2, fw_arg3);
++	if (prom_firmware_cmdline)
++		printk(KERN_INFO "VCOREIII PROM ARGV-ACCEPTED argc=%u envc=%u\n",
++		       prom_argc_accepted, prom_envc_accepted);
++	else
++		printk(KERN_INFO "VCOREIII PROM ARGV-ABSENT builtin fallback eligible\n");
++#endif
+ 	printk(KERN_INFO "Cleared TLB\n");
+ 	printk(KERN_INFO "c0_wired=%08lx\n", wired_status);
+ #endif /* CONFIG_EARLY_PRINTK */

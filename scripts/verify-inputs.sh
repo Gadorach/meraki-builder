@@ -9,6 +9,8 @@ required=(
   "$KERNEL_ARTIFACT_DIR/vmlinuz"
   "$KERNEL_ARTIFACT_DIR/vmlinuz.bin"
   "$KERNEL_HEADERS_TARBALL"
+  "$KERNEL_BUILD_CONTRACT_RECORD"
+  "$ARTIFACTS_DIR/kernel-source-revision.txt"
   "$LOADER_ARTIFACT"
   "$LOADER_MANIFEST"
   "$LOADER_BUILD_SOURCE_RECORD"
@@ -209,6 +211,15 @@ for key, value in expected_embedded.items():
         raise SystemExit(f"loader embedded PMOSLIVE {key} mismatch")
 PY
 
+python3 "$SCRIPT_DIR/kernel-build-contract.py" verify \
+  --record "$KERNEL_BUILD_CONTRACT_RECORD" \
+  --source-revision-file "$ARTIFACTS_DIR/kernel-source-revision.txt" \
+  --patch "$KERNEL_BOOTARGS_PATCH" \
+  --config-policy "$SCRIPT_DIR/configure-liveboot-kernel.py" \
+  --vmlinuz "$KERNEL_ARTIFACT_DIR/vmlinuz" \
+  --vmlinuz-bin "$KERNEL_ARTIFACT_DIR/vmlinuz.bin" \
+  --headers "$KERNEL_HEADERS_TARBALL"
+
 entry="$(readelf -h "$KERNEL_ARTIFACT_DIR/vmlinuz" | awk '/Entry point address/ {print $4}')"
 [[ "$entry" == 0x81000000 ]] || die "Unexpected compressed-kernel entry point: $entry"
 (( $(file_size "$KERNEL_ARTIFACT_DIR/vmlinuz.bin") + 32 <= 0x2c0000 )) || \
@@ -224,7 +235,8 @@ record_tree() {
   done < <(find "$root" -type f -print0 | sort -z)
 }
 for input in "$KERNEL_ARTIFACT_DIR/vmlinuz" "$KERNEL_ARTIFACT_DIR/vmlinuz.bin" \
-  "$KERNEL_HEADERS_TARBALL" "$LOADER_ARTIFACT" "$LOADER_MANIFEST" \
+  "$KERNEL_HEADERS_TARBALL" "$KERNEL_BUILD_CONTRACT_RECORD" \
+  "$ARTIFACTS_DIR/kernel-source-revision.txt" "$LOADER_ARTIFACT" "$LOADER_MANIFEST" \
   "$LOADER_BUILD_SOURCE_RECORD" "$LOADER_SOURCE_REVISION_FILE" "$LOADER_SOURCE_VERSION_FILE" \
   "$ARTIFACTS_DIR/tools/mkvcoreiii_payload.py"; do
   hash="$(sha256sum "$input" | awk '{print $1}')"

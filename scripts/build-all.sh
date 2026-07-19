@@ -63,15 +63,32 @@ export INCLUDE_UI
 # the commit is already present in the existing checkout.
 "$SCRIPT_DIR/prepare-sources.sh"
 
-if [[ ! -f "$KERNEL_ARTIFACT_DIR/vmlinuz.bin" || ! -f "$KERNEL_HEADERS_TARBALL" ]] || \
-   bool_enabled "${REBUILD_KERNEL:-0}"; then
-  if bool_enabled "${AUTO_BUILD_KERNEL:-0}" || ask_yes_no "A usable kernel build is missing. Build it now?" yes; then
+kernel_reusable=0
+if [[ -f "$KERNEL_ARTIFACT_DIR/vmlinuz" && -f "$KERNEL_ARTIFACT_DIR/vmlinuz.bin" && \
+      -f "$KERNEL_HEADERS_TARBALL" && -f "$KERNEL_BUILD_CONTRACT_RECORD" ]] && \
+   ! bool_enabled "${REBUILD_KERNEL:-0}"; then
+  if python3 "$SCRIPT_DIR/kernel-build-contract.py" verify \
+      --record "$KERNEL_BUILD_CONTRACT_RECORD" \
+      --source-revision-file "$ARTIFACTS_DIR/kernel-source-revision.txt" \
+      --patch "$KERNEL_BOOTARGS_PATCH" \
+      --config-policy "$SCRIPT_DIR/configure-liveboot-kernel.py" \
+      --vmlinuz "$KERNEL_ARTIFACT_DIR/vmlinuz" \
+      --vmlinuz-bin "$KERNEL_ARTIFACT_DIR/vmlinuz.bin" \
+      --headers "$KERNEL_HEADERS_TARBALL"; then
+    kernel_reusable=1
+  else
+    warn "Existing kernel artifacts do not satisfy the current PMOSLIVE boot-argument contract; rebuilding."
+  fi
+fi
+
+if (( kernel_reusable == 0 )); then
+  if bool_enabled "${AUTO_BUILD_KERNEL:-0}" || ask_yes_no "A usable PMOSLIVE-compatible kernel build is missing. Build it now?" yes; then
     "$SCRIPT_DIR/build-kernel.sh"
   else
-    die "Kernel artifacts are required."
+    die "PMOSLIVE-compatible kernel artifacts are required."
   fi
 else
-  log "Reusing existing kernel artifacts"
+  log "Reusing verified PMOSLIVE-compatible kernel artifacts"
 fi
 
 if [[ ! -f "$LOADER_ARTIFACT" || ! -f "$LOADER_MANIFEST" || ! -f "$LOADER_BUILD_SOURCE_RECORD" ]] || \

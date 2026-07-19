@@ -51,6 +51,7 @@ This index is the authoritative navigation map for the current repository revisi
 - [Adding a model](development/adding-model.md)
 - [Compatibility testing](development/compatibility-testing.md)
 - [Runtime stabilization hardware testing](development/runtime-stabilization-testing.md)
+- [PMOSLIVE firmware flasher and standard MIPS/U-Boot handoff](development/pmoslive-firmware-flasher-integration-2026-07-19.md)
 
 ## Component reference
 

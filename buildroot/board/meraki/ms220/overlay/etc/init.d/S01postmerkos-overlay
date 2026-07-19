@@ -14,6 +14,7 @@ LIVE_MARKER=${POSTMERKOS_LIVE_MARKER:-$RUNDIR/live-mode}
 LOG=${POSTMERKOS_OVERLAY_LOG:-$RUNDIR/overlay.log}
 PROC_MOUNTS=${POSTMERKOS_PROC_MOUNTS:-/proc/mounts}
 PROC_CMDLINE=${POSTMERKOS_PROC_CMDLINE:-/proc/cmdline}
+CONSOLE=${POSTMERKOS_CONSOLE:-/dev/console}
 mkdir -p "$RUNDIR"
 
 # BusyBox mount -a runs before rcS. In a partially damaged overlay, /etc may
@@ -30,7 +31,7 @@ fi
 
 log() {
     printf '%s\n' "$*" >>"$LOG" 2>/dev/null || true
-    printf 'postmerkOS overlay: %s\n' "$*" >/dev/console 2>/dev/null || true
+    printf 'postmerkOS overlay: %s\n' "$*" >"$CONSOLE" 2>/dev/null || true
 }
 
 live_boot() {
@@ -123,6 +124,13 @@ start_overlay() {
         log "management recovery overlay is active; changes will not survive reboot"
     else
         log "persistent writable overlays are ready"
+    fi
+    if [ -f "$LIVE_MARKER" ]; then
+        if grep -Eq '(^|[[:space:]])/dev/mtdblock[0-9]+[[:space:]]+[^[:space:]]+[[:space:]]+jffs2([[:space:]]|$)' "$PROC_MOUNTS" 2>/dev/null; then
+            log "PMOSLIVE safety failure: a persistent JFFS2 filesystem is mounted"
+            return 1
+        fi
+        printf '%s\n' 'PMOSLIVE USERSPACE-READY ROOT=ram0 OVERLAY=tmpfs FLASH_MOUNTED=0' >"$CONSOLE" 2>/dev/null || true
     fi
     return 0
 }
