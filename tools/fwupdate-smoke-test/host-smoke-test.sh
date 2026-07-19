@@ -63,8 +63,8 @@ truncate -s 16777216 "$TMP/test.bin"
 printf 'PMOSRAM READY 2' | dd of="$TMP/test.bin" bs=1 seek=$((0x100)) conv=notrunc status=none
 printf SPIM | dd of="$TMP/test.bin" bs=1 seek=$((0x40000)) conv=notrunc status=none
 printf hsqs | dd of="$TMP/test.bin" bs=1 seek=$((0x300000)) conv=notrunc status=none
-mkdir -p "$TMP/recovery"
-python3 - "$TMP/test.bin" "$TMP/test.bin.manifest.json" "$TMP/loader.manifest.json" "$TMP/recovery" <<'PY'
+mkdir -p "$TMP/recovery" "$TMP/liveboot"
+python3 - "$TMP/test.bin" "$TMP/test.bin.manifest.json" "$TMP/loader.manifest.json" "$TMP/recovery" "$TMP/liveboot" <<'PY'
 import hashlib
 import json
 import os
@@ -73,8 +73,9 @@ import struct
 import sys
 import zlib
 
-image, output, loader_output, recovery_raw = sys.argv[1:]
+image, output, loader_output, recovery_raw, liveboot_raw = sys.argv[1:]
 recovery = Path(recovery_raw)
+liveboot = Path(liveboot_raw)
 targets = {
     'luton26': {
         'id': 1, 'spi': 0x70000064,
@@ -140,7 +141,7 @@ for family, target in targets.items():
     payload_digest = hashlib.sha256(raw).hexdigest()
     embedded[family] = {
         'path': str(payload), 'size': len(raw), 'sha256': payload_digest,
-        'load_address': 0x81000000, 'entry_address': 0x81000000,
+        'load_address': 0x86C00000, 'entry_address': 0x86C00000,
         'entry_contract': 'flat-binary-byte-zero-v1',
         'manifest_lookup_contract': 'direct-object-members-v1',
         'hardware_preflight_contract': 'spi-nor-scratch-rw-restore-loader-crc-v4',
@@ -158,8 +159,8 @@ for family, target in targets.items():
         'accepted_jedec_ids': jedec,
         'flash_geometry': geometry,
         'operations': ['verify', 'preflight', 'dry-run', 'flash'],
-        'load_address': 0x81000000,
-        'entry_address': 0x81000000,
+        'load_address': 0x86C00000,
+        'entry_address': 0x86C00000,
         'entry_contract': 'flat-binary-byte-zero-v1',
         'manifest_lookup_contract': 'direct-object-members-v1',
         'hardware_preflight_contract': 'spi-nor-scratch-rw-restore-loader-crc-v4',
@@ -176,6 +177,68 @@ for family, target in targets.items():
     (recovery / f'recovery-{family}.descriptor.json').write_text(
         json.dumps(descriptor, indent=2, sort_keys=True) + '\n'
     )
+
+live_marker = (
+    b"PMOSLIVE3;SOC=jaguar1;FAMILY=2;PROTO=3;FLASH=0;LIVEBOOT=1;"
+    b"IMAGE_BYTES=16777216;KERNEL=81000000;ROOTFS=87000000;MEM_MIB=120;"
+    b"FRAME_MAX=4096;WINDOW_MAX=16;SPARSE=1;LZ4=1;END"
+)
+live_payload = liveboot / 'pmoslive-jaguar1.bin'
+live_payload.write_bytes(b'smoke-liveboot\0' + live_marker + b'\0')
+live_raw = live_payload.read_bytes()
+live_digest = hashlib.sha256(live_raw).hexdigest()
+live_ram = {
+    'kernel_load_address': 0x81000000,
+    'image_staging_address': 0x81400000,
+    'manifest_address': 0x82400000,
+    'payload_address': 0x86C00000,
+    'squashfs_address': 0x87000000,
+    'boot_params_physical_address': 0x00000400,
+    'boot_params_uncached_address': 0xA0000400,
+    'boot_params_bytes': 0x00000C00,
+    'linux_memory_mib': 120,
+    'top_reserved_mib': 8,
+}
+live_descriptor = {
+    'format': 'postmerkos.uart-liveboot-payload.v1',
+    'protocol_version': 3,
+    'soc_family': 'jaguar1',
+    'soc_family_id': 2,
+    'accepted_models': ['MS42', 'MS42P'],
+    'operations': ['verify', 'dry-run', 'liveboot'],
+    'flash_access': 'none',
+    'load_address': 0x86C00000,
+    'entry_address': 0x86C00000,
+    'entry_contract': 'flat-binary-byte-zero-v1',
+    'transport_contract': 'pmosrec-v3-adaptive-uart-sparse-lz4-v1',
+    'linux_handoff': 'mips-legacy-argc-argv-envp-external-initrd-v1',
+    'rootfs_handoff': 'squashfs-as-legacy-initrd-v1',
+    'image': {'bytes': 0x1000000, 'kernel_offset': 0x40000, 'squashfs_offset': 0x300000},
+    'ram_layout': live_ram,
+    'binary': {'filename': live_payload.name, 'bytes': len(live_raw), 'sha256': live_digest},
+}
+(liveboot / 'pmoslive-jaguar1.descriptor.json').write_text(
+    json.dumps(live_descriptor, indent=2, sort_keys=True) + '\n'
+)
+embedded_live = {
+    'size': len(live_raw),
+    'sha256': live_digest,
+    'load_address': 0x86C00000,
+    'entry_address': 0x86C00000,
+    'entry_contract': 'flat-binary-byte-zero-v1',
+    'flash_access': 'none',
+    'accepted_models': ['MS42', 'MS42P'],
+    'transport_contract': 'pmosrec-v3-adaptive-uart-sparse-lz4-v1',
+    'linux_handoff': 'mips-legacy-argc-argv-envp-external-initrd-v1',
+    'rootfs_handoff': 'squashfs-as-legacy-initrd-v1',
+    'kernel_load_address': 0x81000000,
+    'squashfs_address': 0x87000000,
+    'boot_params_physical_address': 0x00000400,
+    'boot_params_uncached_address': 0xA0000400,
+    'boot_params_bytes': 0x00000C00,
+    'linux_memory_mib': 120,
+    'top_reserved_mib': 8,
+}
 
 loader = image_data[:0x40000]
 Path(loader_output).write_text(json.dumps({
@@ -202,11 +265,14 @@ Path(loader_output).write_text(json.dumps({
         'boot_menu': {
             'probe_timeout_ms': 3000,
             'selection_timeout_ms': 5000,
-            'options': {'1': 'uart-ramloader', '2': 'embedded-firmware-recovery'},
+            'options': {'1': 'uart-ramloader', '2': 'embedded-firmware-recovery', '3': 'embedded-liveboot'},
             'noise_behavior': 'invalid/no explicit option continues normal boot',
         },
         'image_check_diagnostics': 'structured-pass-warn-fail-skip-values-v1',
+        'stage1_flash_offset': 0x00020000,
+        'stage1_storage_contract': 'single-shared-boot-region-blob-v1',
         'embedded_recovery': embedded,
+        'embedded_liveboot': {'jaguar1': embedded_live},
     },
 }, indent=2, sort_keys=True) + '\n')
 PY
@@ -220,7 +286,7 @@ cp "$TMP/test.bin" "$TMP/ms42p-postmerkos-test.bin"
 python3 "$ROOT/scripts/write-artifact-manifest.py" \
     "$TMP/test.bin.manifest.json" "$TMP/ms42p-postmerkos-test.bin.manifest.json" \
     "$TMP/ms42p-postmerkos-test.bin" "$TMP/rootfs.squashfs" \
-    "$TMP/loader.manifest.json" "$TMP/recovery"
+    "$TMP/loader.manifest.json" "$TMP/recovery" "$TMP/liveboot"
 python3 - "$TMP/ms42p-postmerkos-test.bin" "$TMP/ms42p-postmerkos-test.bin.manifest.json" <<'PY_PUBLISHED_MANIFEST'
 import hashlib, json, os, sys
 image, manifest_path = sys.argv[1:]

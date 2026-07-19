@@ -13,9 +13,11 @@ import sys
 import termios
 
 from bootloader_protocol import (
+    BOOT_MENU_PREFIX,
     MODEL_FAMILY,
     ProtocolError,
     SerialLink,
+    parse_boot_menu,
     send_ram_payload,
     validate_bundle,
     validate_live_payload_binding,
@@ -130,6 +132,7 @@ def enter_liveboot(link: SerialLink, path: str, timeout: float,
                    payload: LivePayload | None, chunk_size: int,
                    frame_retries: int, ack_timeout: float) -> str:
     line = link.wait_for(("PMOSBOOT MENU-PROBE", "PMOSLIVE READY 3", "PMOSRAM READY 2"), timeout)
+    selected_path = path
     if line.startswith("PMOSLIVE READY 3"):
         accept_live_ready(link, line)
         return "already-running"
@@ -138,9 +141,25 @@ def enter_liveboot(link: SerialLink, path: str, timeout: float,
         trigger = link.wait_for(("PMOSBOOT PASS-MENU-TRIGGER",), 4.0,
                                 error_prefixes=("PMOSBOOT WARN-MENU-TIMEOUT",))
         require_hex_field(trigger, MENU_BYTE_RE, 0x0D, "menu trigger")
-        link.wait_for(("PMOSBOOT MENU 1=UART-RAMLOADER 2=FW-RECOVERY 3=LIVEBOOT",), 4.0)
+        menu_line = link.wait_for((BOOT_MENU_PREFIX,), 4.0)
+        menu_options = parse_boot_menu(menu_line)
         link.wait_for(("PMOSBOOT MENU-READY",), 4.0)
-        choice = b"3" if path in {"embedded", "auto"} else b"1"
+        if path == "embedded":
+            if 3 not in menu_options:
+                raise ProtocolError(
+                    "installed meraki-redboot has the legacy two-option menu; "
+                    "embedded PMOSLIVE is unavailable, so use --liveboot-path ram-upload"
+                )
+            choice = b"3"
+            selected_path = "embedded"
+        elif path == "auto" and 3 in menu_options:
+            choice = b"3"
+            selected_path = "embedded"
+        else:
+            if payload is None:
+                raise ProtocolError("legacy menu requires a standalone PMOSLIVE payload for RAM upload")
+            choice = b"1"
+            selected_path = "ram-upload"
         link.write_all(choice)
         selected = link.wait_for(("PMOSBOOT PASS-MENU-CHOICE",), 4.0)
         require_hex_field(selected, MENU_SELECTION_RE, int(choice), "menu selection")
@@ -153,6 +172,7 @@ def enter_liveboot(link: SerialLink, path: str, timeout: float,
         else:
             line = link.wait_for(("PMOSRAM READY 2",), 10.0)
     if line.startswith("PMOSRAM READY 2"):
+        selected_path = "ram-upload"
         if payload is None:
             raise ProtocolError("RAM-upload liveboot requires --payload")
         send_ram_payload(
@@ -161,10 +181,10 @@ def enter_liveboot(link: SerialLink, path: str, timeout: float,
         )
         line = link.wait_for(("PMOSLIVE READY 3",), 10.0)
     accept_live_ready(link, line)
-    return "embedded" if path in {"embedded", "auto"} else "ram-upload"
+    return selected_path
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--operation", choices=("verify", "dry-run", "boot"), default="verify")
     parser.add_argument("--port")
@@ -186,13 +206,20 @@ def main() -> int:
     parser.add_argument("--diagnostic-baud-scan", action="store_true")
     parser.add_argument("--diagnostic-window-scan", action="store_true")
     parser.add_argument("--verbose-acks", action="store_true")
-    args = parser.parse_args()
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
 
     if args.baud != 115200:
         raise ProtocolError("PMOSRAM/PMOSLIVE bootstrap must start at 115200 baud")
     manifest = args.manifest or Path(str(args.firmware) + ".manifest.json")
-    bundle = validate_bundle(args.firmware, manifest, args.target_model,
-                             force=args.force or args.operation != "boot")
+    bundle = validate_bundle(
+        args.firmware, manifest, args.target_model,
+        force=args.force or args.operation != "boot", require_liveboot=True,
+    )
     if MODEL_FAMILY[args.target_model] != "jaguar1":
         raise ProtocolError("PMOSLIVE currently supports Jaguar1 only")
 

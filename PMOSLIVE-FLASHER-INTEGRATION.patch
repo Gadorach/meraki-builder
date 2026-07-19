@@ -1,0 +1,1374 @@
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' '--exclude=PMOSLIVE-FLASHER-INTEGRATION.patch' a/DIFFSTAT.txt b/DIFFSTAT.txt
+--- a/DIFFSTAT.txt	2026-07-19 13:40:45.000000000 +0000
++++ b/DIFFSTAT.txt	2026-07-19 16:25:50.755051581 +0000
+@@ -40,3 +40,10 @@
+  tools/firmware-flasher/tests/test_pmosrec_v3.py    |  25 ++
+  tools/fwupdate-smoke-test/host-smoke-test.sh       |   2 +-
+  41 files changed, 2112 insertions(+), 109 deletions(-)
++
++PMOSLIVE firmware-flasher integration delta from buildfix1:
++  - main interactive and noninteractive live-boot operations
++  - live-only capability gating; ordinary non-live flashing preserved
++  - PMOSLIVE serial-console state-machine dispatch
++  - serial/menu/handoff regression tests
++  - synchronized current liveboot smoke-test fixture
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' '--exclude=PMOSLIVE-FLASHER-INTEGRATION.patch' a/MODIFIED-FILES.txt b/MODIFIED-FILES.txt
+--- a/MODIFIED-FILES.txt	2026-07-19 13:40:45.000000000 +0000
++++ b/MODIFIED-FILES.txt	2026-07-19 16:27:15.568320200 +0000
+@@ -39,3 +39,12 @@
+ ?? scripts/tests/test-liveboot-kernel-config.py
+ ?? tools/firmware-flasher/PMOSLIVE.md
+ ?? tools/firmware-flasher/bootloader-liveboot.py
++ M tools/firmware-flasher/README.md
++ M tools/firmware-flasher/PMOSLIVE.md
++ M tools/firmware-flasher/bootloader-liveboot.py
++ M tools/firmware-flasher/firmware-flasher.sh
++ M tools/firmware-flasher/serial-runner.py
++ M tools/firmware-flasher/tests/test_flasher_control_flow.sh
++?? tools/firmware-flasher/tests/test_liveboot_console.py
++?? docs/development/pmoslive-firmware-flasher-integration-2026-07-19.md
++?? PMOSLIVE-FLASHER-INTEGRATION.patch
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' '--exclude=PMOSLIVE-FLASHER-INTEGRATION.patch' a/PACKAGE-IDENTITY.txt b/PACKAGE-IDENTITY.txt
+--- a/PACKAGE-IDENTITY.txt	2026-07-19 13:29:30.000000000 +0000
++++ b/PACKAGE-IDENTITY.txt	2026-07-19 16:25:49.492887881 +0000
+@@ -1,7 +1,8 @@
+ Project: meraki-builder
+-Release: pmoslive-mem120-buildfix1
++Release: pmoslive-mem120-flasher-integration1
+ Date: 2026-07-19
+ Source tree: complete working tree without .git metadata or generated caches
+-Validation log: PMOSLIVE-FINAL-TEST-RESULTS.log
+-Build fix report: PMOSLIVE-BUILD-FIX-2026-07-19.md
++Base: pmoslive-mem120-buildfix1
++Primary interface: tools/firmware-flasher/firmware-flasher.sh
++Integration report: docs/development/pmoslive-firmware-flasher-integration-2026-07-19.md
+ Memory contract: PMOSLIVE-MEMORY-MAP.md
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' '--exclude=PMOSLIVE-FLASHER-INTEGRATION.patch' a/PMOSLIVE-FLASHER-INTEGRATION-TESTS.log b/PMOSLIVE-FLASHER-INTEGRATION-TESTS.log
+--- a/PMOSLIVE-FLASHER-INTEGRATION-TESTS.log	1970-01-01 00:00:00.000000000 +0000
++++ b/PMOSLIVE-FLASHER-INTEGRATION-TESTS.log	2026-07-19 16:27:15.586036861 +0000
+@@ -0,0 +1,14 @@
++PMOSLIVE firmware-flasher integration validation — 2026-07-19
++
++PASS: bash syntax for firmware-flasher, control-flow tests, and updater smoke test
++PASS: Python compilation for all firmware-flasher modules and tests
++PASS: 51 Python protocol, PMOSREC v3, and PMOSLIVE serial-console tests
++PASS: firmware-flasher shell control-flow suite
++PASS: updater/manifest host smoke test with current recovery + liveboot artifact signature
++PASS: firmware-flasher private TFTP/bundle/UART self-test
++PASS: strict embedded PMOSLIVE verification against ms42p-postmerkos-webui-20260719-141728.bin
++PASS: strict RAM-upload PMOSLIVE verification against the same image and pmoslive-jaguar1.bin
++PASS: valid non-live manifest remains accepted by ordinary recovery/flash validation
++PASS: the same non-live manifest is rejected only when PMOSLIVE capability is required
++
++Hardware serial transfer was not executed in this validation environment.
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' '--exclude=PMOSLIVE-FLASHER-INTEGRATION.patch' a/docs/development/pmoslive-firmware-flasher-integration-2026-07-19.md b/docs/development/pmoslive-firmware-flasher-integration-2026-07-19.md
+--- a/docs/development/pmoslive-firmware-flasher-integration-2026-07-19.md	1970-01-01 00:00:00.000000000 +0000
++++ b/docs/development/pmoslive-firmware-flasher-integration-2026-07-19.md	2026-07-19 16:25:49.484437793 +0000
+@@ -0,0 +1,47 @@
++# PMOSLIVE firmware-flasher integration — 2026-07-19
++
++The normal `tools/firmware-flasher/firmware-flasher.sh` interface now exposes
++PMOSLIVE alongside the Linux updater and pre-kernel firmware recovery.
++
++## Operator interface
++
++Interactive operation choices include local live-capability verification,
++target-side PMOSLIVE dry run, and complete RAM boot. Command-line equivalents
++are `--liveboot-verify`, `--liveboot-dry-run`, and `--liveboot`, with
++`--liveboot-path embedded|ram-upload|auto` selecting the entry path.
++
++The artifact list marks a modern full image as `manifest+live` only when its
++manifest declares the complete PMOSLIVE contract. This is informational during
++ordinary flashing.
++
++## Capability boundary
++
++`bootloader_protocol.validate_bundle()` accepts `require_liveboot=False` by
++default. The ordinary recovery/flash path therefore continues to accept a
++valid non-live image. A PMOSLIVE operation passes `require_liveboot=True` and
++then requires menu option 3, the embedded/standalone PMOSLIVE binding, the
++flash-disabled contract, and the expected kernel/rootfs RAM handoff.
++
++## Serial interpretation
++
++`serial-runner.py --console-mode liveboot` dispatches the PMOSLIVE state
++machine. It handles:
++
++- meraki-redboot menu option 3;
++- menu option 1 plus PMOSRAM2 payload upload;
++- PMOSLIVE readiness, descriptor, RAM-map and transport records;
++- PMOSREC v3 manifest-first image transfer;
++- SPIM/SquashFS target validation and dry-run completion;
++- `BOOTRAM <nonce>` confirmation;
++- target and host UART restoration to 115200;
++- recognition of the first Linux boot banner.
++
++The existing firmware console parser remains the default and rejects the
++live-only `boot` operation.
++
++## Validation
++
++The integration was validated with 51 Python tests, the shell control-flow
++suite, the updater host smoke test, the flasher private self-test, and strict
++embedded plus RAM-upload verification against the produced
++`ms42p-postmerkos-webui-20260719-141728.bin` artifact.
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' '--exclude=PMOSLIVE-FLASHER-INTEGRATION.patch' a/tools/firmware-flasher/BOOTLOADER-RECOVERY.md b/tools/firmware-flasher/BOOTLOADER-RECOVERY.md
+--- a/tools/firmware-flasher/BOOTLOADER-RECOVERY.md	2026-07-19 02:04:58.000000000 +0000
++++ b/tools/firmware-flasher/BOOTLOADER-RECOVERY.md	2026-07-19 16:17:53.881159456 +0000
+@@ -76,44 +76,42 @@
+ `0x20000`; the active and fallback LinuxLoader bodies remain separate and both
+ copy the same validated stage into uncached RAM at `0xa7f00000`.
+ 
+-Host-side validation does not open the serial port:
++The preferred interface is the main firmware flasher. Host-side validation does
++not open the serial port:
+ 
+ ```sh
+-python3 tools/firmware-flasher/bootloader-liveboot.py \
+-  --operation verify \
++./tools/firmware-flasher/firmware-flasher.sh \
+   --firmware artifacts/<full-image>.bin \
+-  --manifest artifacts/<full-image>.manifest.json \
+-  --target-model MS42P \
+-  --payload artifacts/liveboot/pmoslive-jaguar1.bin
++  --liveboot-verify \
++  --target-model MS42P
+ ```
+ 
+ Exercise the complete transfer and target parsing path without jumping to
+ Linux:
+ 
+ ```sh
+-python3 tools/firmware-flasher/bootloader-liveboot.py \
+-  --operation dry-run \
+-  --port /dev/serial/by-id/<adapter> \
+-  --liveboot-path auto \
+-  --payload artifacts/liveboot/pmoslive-jaguar1.bin \
++./tools/firmware-flasher/firmware-flasher.sh \
+   --firmware artifacts/<full-image>.bin \
+-  --manifest artifacts/<full-image>.manifest.json \
+-  --target-model MS42P
++  --liveboot-dry-run \
++  --liveboot-path auto \
++  --target-model MS42P \
++  --serial-device /dev/serial/by-id/<adapter>
+ ```
+ 
+ Boot from RAM:
+ 
+ ```sh
+-python3 tools/firmware-flasher/bootloader-liveboot.py \
+-  --operation boot \
+-  --port /dev/serial/by-id/<adapter> \
+-  --liveboot-path auto \
+-  --payload artifacts/liveboot/pmoslive-jaguar1.bin \
++./tools/firmware-flasher/firmware-flasher.sh \
+   --firmware artifacts/<full-image>.bin \
+-  --manifest artifacts/<full-image>.manifest.json \
+-  --target-model MS42P
++  --liveboot \
++  --liveboot-path auto \
++  --target-model MS42P \
++  --serial-device /dev/serial/by-id/<adapter>
+ ```
+ 
++The lower-level `bootloader-liveboot.py` remains available for protocol
++development, but normal operator testing should use `firmware-flasher.sh`.
++
+ `auto` first tries the embedded menu-3 payload and, after a requested power
+ cycle, can fall back to uploading the supplied PMOSLIVE payload through menu
+ option 1. `dry-run` stops after image parsing. `boot` requires the
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' '--exclude=PMOSLIVE-FLASHER-INTEGRATION.patch' a/tools/firmware-flasher/PMOSLIVE.md b/tools/firmware-flasher/PMOSLIVE.md
+--- a/tools/firmware-flasher/PMOSLIVE.md	2026-07-19 13:23:27.000000000 +0000
++++ b/tools/firmware-flasher/PMOSLIVE.md	2026-07-19 16:17:52.742512944 +0000
+@@ -57,12 +57,53 @@
+ that userspace policy, so development images should still be treated as
+ trusted code.
+ 
++## Main firmware-flasher integration
++
++PMOSLIVE is exposed by the normal firmware utility, both interactively and by
++command line. The utility labels manifest-aware full images as `manifest+live`
++when they declare the complete PMOSLIVE contract.
++
++```sh
++# Host-only strict capability validation.
++./tools/firmware-flasher/firmware-flasher.sh \
++  --firmware artifacts/<full-image>.bin \
++  --liveboot-verify --target-model MS42P
++
++# Full transfer and target parsing without entering Linux.
++./tools/firmware-flasher/firmware-flasher.sh \
++  --firmware artifacts/<full-image>.bin \
++  --liveboot-dry-run --liveboot-path ram-upload \
++  --target-model MS42P \
++  --serial-device /dev/serial/by-id/<adapter>
++
++# Boot using the PMOSLIVE payload embedded behind menu option 3.
++./tools/firmware-flasher/firmware-flasher.sh \
++  --firmware artifacts/<full-image>.bin \
++  --liveboot --liveboot-path embedded \
++  --target-model MS42P \
++  --serial-device /dev/serial/by-id/<adapter>
++```
++
++The path can be `embedded`, `ram-upload`, or `auto`. A ram-upload/auto run uses
++`artifacts/liveboot/pmoslive-jaguar1.bin` and its adjacent descriptor unless
++`--liveboot-payload` and `--liveboot-descriptor` override them.
++
++Capability gating is intentionally asymmetric: PMOSLIVE operations require the
++live metadata, compatible kernel/rootfs handoff, and flash-disabled payload.
++Ordinary firmware flashing does **not** require those records and continues to
++accept otherwise valid non-live images.
++
++The integrated serial interpreter handles the new boot-menu choice, PMOSRAM2
++payload upload where selected, PMOSLIVE readiness and RAM-map records, PMOSREC
++v3 manifest/image transfer, the non-destructive `BOOTRAM <nonce>` challenge,
++UART restoration to 115200, and detection of the first Linux banner.
++
+ ## Validation and first test
+ 
+-Run host validation first, then a serial dry run, then a real boot. See
+-`BOOTLOADER-RECOVERY.md` for complete commands. A power cycle always abandons a
+-RAM-only operation and returns to the installed loader/firmware.
+-
+-The first hardware run should use `--skip-baud-negotiation` if maximum
+-simplicity is preferred. After a successful dry run at 115200, repeat with the
+-normal adaptive baud path.
++Run host validation first, then a serial dry run, then a real boot. A power
++cycle always abandons a RAM-only operation and returns to the installed
++loader/firmware.
++
++The first hardware run can add `--skip-baud-negotiation` if maximum simplicity
++is preferred. After a successful dry run at 115200, repeat with the normal
++adaptive baud path.
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' '--exclude=PMOSLIVE-FLASHER-INTEGRATION.patch' a/tools/firmware-flasher/README.md b/tools/firmware-flasher/README.md
+--- a/tools/firmware-flasher/README.md	2026-06-30 10:08:42.000000000 +0000
++++ b/tools/firmware-flasher/README.md	2026-07-19 16:17:51.559794168 +0000
+@@ -1,7 +1,8 @@
+ # Firmware flasher
+ 
+-`firmware-flasher.sh` validates a selected artifact and starts either the normal
+-Linux updater or meraki-redboot pre-kernel UART recovery.
++`firmware-flasher.sh` validates a selected artifact and starts the normal Linux
++updater, meraki-redboot pre-kernel UART recovery, or non-destructive PMOSLIVE RAM
++boot. The interactive operation menu exposes all three workflows.
+ 
+ ## Artifact contracts
+ 
+@@ -18,7 +19,49 @@
+ normal system regions; full scope requires an exact 16 MiB image and the
+ independent full-flash acknowledgements.
+ 
+-## Pre-kernel mode
++## PMOSLIVE RAM boot
++
++The main flasher performs local capability checks, target-side validation-only
++runs, and complete RAM boots:
++
++```sh
++# Local image/loader/kernel/rootfs/payload validation; no serial access.
++./tools/firmware-flasher/firmware-flasher.sh \
++  --firmware artifacts/<full-image>.bin \
++  --liveboot-verify \
++  --target-model MS42P
++
++# Transfer and parse everything on the target, but do not enter Linux.
++./tools/firmware-flasher/firmware-flasher.sh \
++  --firmware artifacts/<full-image>.bin \
++  --liveboot-dry-run \
++  --liveboot-path ram-upload \
++  --target-model MS42P \
++  --serial-device /dev/serial/by-id/<adapter>
++
++# Use installed menu option 3 and boot Linux entirely from RAM.
++./tools/firmware-flasher/firmware-flasher.sh \
++  --firmware artifacts/<full-image>.bin \
++  --liveboot \
++  --liveboot-path embedded \
++  --target-model MS42P \
++  --serial-device /dev/serial/by-id/<adapter>
++```
++
++`--liveboot-path` accepts `embedded`, `ram-upload`, or `auto`. RAM upload uses
++`artifacts/liveboot/pmoslive-jaguar1.bin` by default; override it with
++`--liveboot-payload` and `--liveboot-descriptor`.
++
++Live capability is a separate, stricter contract. Images without
++`recovery.uart_liveboot` metadata remain eligible for ordinary SSH, serial, and
++bootloader recovery flashing; only a requested PMOSLIVE operation rejects them.
++The serial runner understands menu option 3, menu-option-1 payload upload,
++PMOSREC v3 image transfer, `BOOTRAM <nonce>`, UART restoration to 115200, and
++the first Linux banner.
++
++See [`PMOSLIVE.md`](PMOSLIVE.md) for the RAM map and safety boundary.
++
++## Pre-kernel firmware recovery
+ 
+ ```sh
+ ./tools/firmware-flasher/firmware-flasher.sh \
+@@ -60,6 +103,14 @@
+ ./tools/firmware-flasher/firmware-flasher.sh --bootloader-recovery --target-model MS220-8P
+ ./tools/firmware-flasher/firmware-flasher.sh --bootloader-recovery --recovery-path ram-upload \
+   --recovery-payload artifacts/recovery/recovery-jaguar1.bin --target-model MS42P
++./tools/firmware-flasher/firmware-flasher.sh --liveboot-verify \
++  --firmware artifacts/<full-image>.bin --target-model MS42P
++./tools/firmware-flasher/firmware-flasher.sh --liveboot-dry-run \
++  --firmware artifacts/<full-image>.bin --liveboot-path ram-upload \
++  --target-model MS42P --serial-device /dev/serial/by-id/<adapter>
++./tools/firmware-flasher/firmware-flasher.sh --liveboot \
++  --firmware artifacts/<full-image>.bin --liveboot-path embedded \
++  --target-model MS42P --serial-device /dev/serial/by-id/<adapter>
+ ./tools/firmware-flasher/firmware-flasher.sh --self-test
+ ```
+ 
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' '--exclude=PMOSLIVE-FLASHER-INTEGRATION.patch' a/tools/firmware-flasher/bootloader-liveboot.py b/tools/firmware-flasher/bootloader-liveboot.py
+--- a/tools/firmware-flasher/bootloader-liveboot.py	2026-07-19 01:06:58.000000000 +0000
++++ b/tools/firmware-flasher/bootloader-liveboot.py	2026-07-19 16:05:05.689553196 +0000
+@@ -164,7 +164,7 @@
+     return "embedded" if path in {"embedded", "auto"} else "ram-upload"
+ 
+ 
+-def main() -> int:
++def build_parser() -> argparse.ArgumentParser:
+     parser = argparse.ArgumentParser(description=__doc__)
+     parser.add_argument("--operation", choices=("verify", "dry-run", "boot"), default="verify")
+     parser.add_argument("--port")
+@@ -186,13 +186,20 @@
+     parser.add_argument("--diagnostic-baud-scan", action="store_true")
+     parser.add_argument("--diagnostic-window-scan", action="store_true")
+     parser.add_argument("--verbose-acks", action="store_true")
+-    args = parser.parse_args()
++    return parser
++
++
++def main(argv: list[str] | None = None) -> int:
++    parser = build_parser()
++    args = parser.parse_args(argv)
+ 
+     if args.baud != 115200:
+         raise ProtocolError("PMOSRAM/PMOSLIVE bootstrap must start at 115200 baud")
+     manifest = args.manifest or Path(str(args.firmware) + ".manifest.json")
+-    bundle = validate_bundle(args.firmware, manifest, args.target_model,
+-                             force=args.force or args.operation != "boot")
++    bundle = validate_bundle(
++        args.firmware, manifest, args.target_model,
++        force=args.force or args.operation != "boot", require_liveboot=True,
++    )
+     if MODEL_FAMILY[args.target_model] != "jaguar1":
+         raise ProtocolError("PMOSLIVE currently supports Jaguar1 only")
+ 
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' '--exclude=PMOSLIVE-FLASHER-INTEGRATION.patch' a/tools/firmware-flasher/bootloader_protocol.py b/tools/firmware-flasher/bootloader_protocol.py
+--- a/tools/firmware-flasher/bootloader_protocol.py	2026-07-19 01:54:26.000000000 +0000
++++ b/tools/firmware-flasher/bootloader_protocol.py	2026-07-19 16:04:49.902992561 +0000
+@@ -200,7 +200,7 @@
+     )
+ 
+ 
+-def _validate_loader_capability(manifest: dict, loader_sha256: str, family: str) -> None:
++def _validate_loader_capability(manifest: dict, loader_sha256: str, family: str, *, require_liveboot: bool = False) -> None:
+     recovery = manifest.get("recovery")
+     if not isinstance(recovery, dict):
+         raise ProtocolError("manifest does not contain a recovery capability record")
+@@ -217,13 +217,11 @@
+     if loader.get("build_manifest_format") != "postmerkos.vcoreiii-linuxloader-build.v7":
+         raise ProtocolError("firmware loader is not a meraki-redboot v0.7 source build")
+     menu = loader.get("boot_menu")
+-    expected_options = {
+-        "1": "uart-ramloader",
+-        "2": "embedded-firmware-recovery",
+-        "3": "embedded-liveboot",
+-    }
+-    if not isinstance(menu, dict) or menu.get("options") != expected_options:
++    options = menu.get("options") if isinstance(menu, dict) else None
++    if not isinstance(options, dict) or options.get("1") != "uart-ramloader" or options.get("2") != "embedded-firmware-recovery":
+         raise ProtocolError("firmware loader does not expose the meraki-redboot recovery menu")
++    if require_liveboot and options.get("3") != "embedded-liveboot":
++        raise ProtocolError("firmware loader does not expose embedded PMOSLIVE menu option 3")
+     if loader.get("image_check_diagnostics") != "structured-pass-warn-fail-skip-values-v1":
+         raise ProtocolError("firmware loader does not declare structured image diagnostics")
+     if loader.get("stage1_flash_offset") != 0x00020000 or loader.get("stage1_storage_contract") != "single-shared-boot-region-blob-v1":
+@@ -254,36 +252,37 @@
+         raise ProtocolError(
+             "firmware image contains a recovery payload without the SPI master-enable handoff correction"
+         )
+-    live = loader.get("embedded_liveboot")
+-    live_record = live.get("jaguar1") if isinstance(live, dict) else None
+-    if not isinstance(live_record, dict):
+-        raise ProtocolError("firmware loader does not bind an embedded Jaguar1 PMOSLIVE payload")
+-    if not re.fullmatch(r"[0-9a-fA-F]{64}", str(live_record.get("sha256", ""))):
+-        raise ProtocolError("firmware loader PMOSLIVE binding has an invalid SHA-256")
+-    if live_record.get("load_address") != 0x86C00000 or live_record.get("entry_address") != 0x86C00000:
+-        raise ProtocolError("firmware loader PMOSLIVE payload is not linked at 0x86c00000")
+-    if live_record.get("entry_contract") != "flat-binary-byte-zero-v1":
+-        raise ProtocolError("firmware loader PMOSLIVE payload lacks the byte-zero entry contract")
+-    if live_record.get("flash_access") != "none":
+-        raise ProtocolError("firmware loader PMOSLIVE payload is not declared flash-write-free")
+-    if live_record.get("accepted_models") != ["MS42", "MS42P"]:
+-        raise ProtocolError("firmware loader PMOSLIVE target allow-list is incompatible")
+-    if live_record.get("transport_contract") != "pmosrec-v3-adaptive-uart-sparse-lz4-v1":
+-        raise ProtocolError("firmware loader PMOSLIVE transport contract is incompatible")
+-    if live_record.get("linux_handoff") != "mips-legacy-argc-argv-envp-external-initrd-v1":
+-        raise ProtocolError("firmware loader PMOSLIVE Linux handoff contract is incompatible")
+-    if live_record.get("rootfs_handoff") != "squashfs-as-legacy-initrd-v1":
+-        raise ProtocolError("firmware loader PMOSLIVE rootfs handoff contract is incompatible")
+-    if live_record.get("kernel_load_address") != 0x81000000 or live_record.get("squashfs_address") != 0x87000000:
+-        raise ProtocolError("firmware loader PMOSLIVE RAM layout is incompatible")
+-    if (
+-        live_record.get("boot_params_physical_address") != 0x00000400
+-        or live_record.get("boot_params_uncached_address") != 0xA0000400
+-        or live_record.get("boot_params_bytes") != 0x00000C00
+-    ):
+-        raise ProtocolError("firmware loader PMOSLIVE boot-parameter workspace is incompatible")
+-    if live_record.get("linux_memory_mib") != 120 or live_record.get("top_reserved_mib") != 8:
+-        raise ProtocolError("firmware loader PMOSLIVE memory reservation is incompatible")
++    if require_liveboot:
++        live = loader.get("embedded_liveboot")
++        live_record = live.get("jaguar1") if isinstance(live, dict) else None
++        if not isinstance(live_record, dict):
++            raise ProtocolError("firmware loader does not bind an embedded Jaguar1 PMOSLIVE payload")
++        if not re.fullmatch(r"[0-9a-fA-F]{64}", str(live_record.get("sha256", ""))):
++            raise ProtocolError("firmware loader PMOSLIVE binding has an invalid SHA-256")
++        if live_record.get("load_address") != 0x86C00000 or live_record.get("entry_address") != 0x86C00000:
++            raise ProtocolError("firmware loader PMOSLIVE payload is not linked at 0x86c00000")
++        if live_record.get("entry_contract") != "flat-binary-byte-zero-v1":
++            raise ProtocolError("firmware loader PMOSLIVE payload lacks the byte-zero entry contract")
++        if live_record.get("flash_access") != "none":
++            raise ProtocolError("firmware loader PMOSLIVE payload is not declared flash-write-free")
++        if live_record.get("accepted_models") != ["MS42", "MS42P"]:
++            raise ProtocolError("firmware loader PMOSLIVE target allow-list is incompatible")
++        if live_record.get("transport_contract") != "pmosrec-v3-adaptive-uart-sparse-lz4-v1":
++            raise ProtocolError("firmware loader PMOSLIVE transport contract is incompatible")
++        if live_record.get("linux_handoff") != "mips-legacy-argc-argv-envp-external-initrd-v1":
++            raise ProtocolError("firmware loader PMOSLIVE Linux handoff contract is incompatible")
++        if live_record.get("rootfs_handoff") != "squashfs-as-legacy-initrd-v1":
++            raise ProtocolError("firmware loader PMOSLIVE rootfs handoff contract is incompatible")
++        if live_record.get("kernel_load_address") != 0x81000000 or live_record.get("squashfs_address") != 0x87000000:
++            raise ProtocolError("firmware loader PMOSLIVE RAM layout is incompatible")
++        if (
++            live_record.get("boot_params_physical_address") != 0x00000400
++            or live_record.get("boot_params_uncached_address") != 0xA0000400
++            or live_record.get("boot_params_bytes") != 0x00000C00
++        ):
++            raise ProtocolError("firmware loader PMOSLIVE boot-parameter workspace is incompatible")
++        if live_record.get("linux_memory_mib") != 120 or live_record.get("top_reserved_mib") != 8:
++            raise ProtocolError("firmware loader PMOSLIVE memory reservation is incompatible")
+ 
+ 
+ def validate_spim_kernel(image: Path, artifact: dict | None = None) -> dict[str, int | str]:
+@@ -560,7 +559,7 @@
+         raise ProtocolError("recovery payload adaptive transport contract does not match the release manifest")
+ 
+ 
+-def validate_bundle(image: Path, manifest_path: Path, model: str, *, force: bool) -> BundleInfo:
++def validate_bundle(image: Path, manifest_path: Path, model: str, *, force: bool, require_liveboot: bool = False) -> BundleInfo:
+     if model not in MODEL_FAMILY:
+         raise ProtocolError(f"unsupported exact target model: {model}")
+     if not image.is_file() or image.stat().st_size != FULL_IMAGE_SIZE:
+@@ -596,11 +595,23 @@
+         raise ProtocolError(f"{model} is untested in this artifact; force operation is required")
+     with image.open("rb") as stream:
+         loader = stream.read(LOADER_REGION_SIZE)
+-    _validate_loader_capability(manifest, hashlib.sha256(loader).hexdigest(), MODEL_FAMILY[model])
++    _validate_loader_capability(
++        manifest, hashlib.sha256(loader).hexdigest(), MODEL_FAMILY[model],
++        require_liveboot=require_liveboot,
++    )
+     _recovery_payload_record(manifest, MODEL_FAMILY[model], model)
+-    if model in {"MS42", "MS42P"}:
++    if require_liveboot:
++        if model not in {"MS42", "MS42P"}:
++            raise ProtocolError("PMOSLIVE currently supports Jaguar1 MS42/MS42P only")
+         _liveboot_payload_record(manifest, model)
+-    for marker in (b"PMOSRAM READY 2", b"PMOSBOOT MENU-PROBE", b"PMOSBOOT MENU 1=UART-RAMLOADER 2=FW-RECOVERY 3=LIVEBOOT"):
++    markers = [
++        b"PMOSRAM READY 2",
++        b"PMOSBOOT MENU-PROBE",
++        b"PMOSBOOT MENU 1=UART-RAMLOADER 2=FW-RECOVERY",
++    ]
++    if require_liveboot:
++        markers.append(b"PMOSBOOT MENU 1=UART-RAMLOADER 2=FW-RECOVERY 3=LIVEBOOT")
++    for marker in markers:
+         if marker not in loader:
+             raise ProtocolError(f"image bootloader region is missing meraki-redboot capability marker {marker!r}")
+     validate_spim_kernel(image, artifact)
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' '--exclude=PMOSLIVE-FLASHER-INTEGRATION.patch' a/tools/firmware-flasher/firmware-flasher.sh b/tools/firmware-flasher/firmware-flasher.sh
+--- a/tools/firmware-flasher/firmware-flasher.sh	2026-06-30 10:08:42.000000000 +0000
++++ b/tools/firmware-flasher/firmware-flasher.sh	2026-07-19 16:17:50.380899357 +0000
+@@ -24,6 +24,10 @@
+ BOOTLOADER_RECOVERY=0
+ BOOTLOADER_PAYLOAD=${BOOTLOADER_PAYLOAD:-}
+ BOOTLOADER_RECOVERY_PATH=${BOOTLOADER_RECOVERY_PATH:-ram-upload}
++LIVEBOOT=0
++LIVEBOOT_PATH=${LIVEBOOT_PATH:-embedded}
++LIVEBOOT_PAYLOAD=${LIVEBOOT_PAYLOAD:-}
++LIVEBOOT_PAYLOAD_DESCRIPTOR=${LIVEBOOT_PAYLOAD_DESCRIPTOR:-}
+ SERIAL_DEVICE=${SERIAL_DEVICE:-}
+ TARGET_MODEL=${TARGET_MODEL:-}
+ FORCE_FLASH=0
+@@ -52,13 +56,20 @@
+   --artifacts DIR       artifact directory (default: ../../artifacts)
+   --firmware FILE       preselect an artifact instead of opening the list
+   --tftp-port PORT      unprivileged TFTP port (default: 1069)
+-  --control METHOD      ssh, serial, or bootloader; otherwise prompt
+-  --transport METHOD    tftp (default) or uart; UART supports serial or bootloader control
++  --control METHOD      ssh, serial, bootloader, or liveboot; otherwise prompt
++  --transport METHOD    tftp (default) or uart; UART supports serial, bootloader, or liveboot
+   --bootloader-recovery use meraki-redboot pre-kernel UART recovery
+   --bootloader-preflight run UART/SPI/NOR erase-program-readback-restore test
++  --liveboot            transfer and boot a live-capable 16 MiB image entirely from RAM
++  --liveboot-dry-run    transfer and validate a live-capable image without entering Linux
++  --liveboot-verify     verify live-boot capability locally without opening serial
++  --liveboot-path PATH  embedded (default), ram-upload, or auto
++  --liveboot-payload FILE  standalone PMOSLIVE payload for ram-upload/auto
++  --liveboot-descriptor FILE  descriptor for --liveboot-payload
++  --liveboot-force      permit an image marked untested for the exact target model
+   --recovery-path PATH ram-upload (default), embedded, or auto
+   --recovery-payload FILE external payload for ram-upload/legacy fallback
+-  --target-model MODEL  exact hardware model required for bootloader recovery
++  --target-model MODEL  exact hardware model for recovery or live boot
+   --preflight-scratch N  aligned 64 KiB NOR address (default: 0x00ff0000)
+   --manual-target-confirmation  require manual ERASEFLASH challenge entry
+   --verbose-acks        print every decoded compact ACK (always retained in logs)
+@@ -87,6 +98,10 @@
+ 
+ Full flash accepts only an exact 16 MiB image and is unavailable in legacy mode.
+ 
++Live boot requires a modern 16 MiB image whose manifest declares recovery.uart_liveboot,
++a compatible built-in RAM-disk/SquashFS kernel, and a flash-disabled PMOSLIVE payload.
++Images without live capability remain valid for ordinary SSH/serial/bootloader flashing.
++
+ Bootloader recovery requires a source-built meraki-redboot with PMOSRAM protocol v2.
+ The host verifies the exact model, SoC-specific recovery payload, release manifest,
+ 16 MiB SPIM/SquashFS layout, loader capability, SHA-256 digests, and frame CRCs.
+@@ -288,6 +303,76 @@
+ PY
+ }
+ 
++
++manifest_declares_liveboot() {
++    local image=$1 manifest="$1.manifest.json"
++    [[ -f $manifest ]] || return 1
++    python3 - "$manifest" <<'PY_LIVE_CAP'
++import json
++import sys
++try:
++    with open(sys.argv[1], encoding="utf-8") as stream:
++        manifest = json.load(stream)
++except (OSError, json.JSONDecodeError):
++    raise SystemExit(1)
++recovery = manifest.get("recovery")
++live = recovery.get("uart_liveboot") if isinstance(recovery, dict) else None
++if not isinstance(live, dict) or live.get("enabled") is not True:
++    raise SystemExit(1)
++if live.get("flash_access") != "none":
++    raise SystemExit(1)
++if live.get("operations") != ["verify", "dry-run", "liveboot"]:
++    raise SystemExit(1)
++payloads = live.get("payloads")
++record = payloads.get("jaguar1") if isinstance(payloads, dict) else None
++if not isinstance(record, dict) or record.get("accepted_models") != ["MS42", "MS42P"]:
++    raise SystemExit(1)
++if record.get("linux_handoff") != "mips-legacy-argc-argv-envp-external-initrd-v1":
++    raise SystemExit(1)
++if record.get("rootfs_handoff") != "squashfs-as-legacy-initrd-v1":
++    raise SystemExit(1)
++PY_LIVE_CAP
++}
++
++report_liveboot_capability() {
++    if [[ $MODE == modern && $SELECTED_TYPE == full ]] && manifest_declares_liveboot "$SELECTED_FIRMWARE"; then
++        log 'selected image declares PMOSLIVE capability; strict target/image validation is available'
++    else
++        log 'selected image does not declare PMOSLIVE capability; ordinary flashing remains available'
++    fi
++}
++
++is_liveboot_operation() {
++    [[ $OPERATION == liveboot-verify || $OPERATION == liveboot-dry-run || $OPERATION == liveboot ]]
++}
++
++activate_liveboot() {
++    [[ $MODE == modern ]] || die 'live boot requires the modern manifest-aware artifact contract'
++    [[ $SELECTED_TYPE == full ]] || die 'live boot requires a supported 16 MiB SPIM/SquashFS full image'
++    manifest_declares_liveboot "$SELECTED_FIRMWARE" || \
++        die 'the selected image does not declare compatible PMOSLIVE capability; it may still be flashed normally'
++    LIVEBOOT=1
++    CONTROL_PATH=liveboot
++    TRANSPORT=uart
++}
++
++select_liveboot_path() {
++    local choice
++    printf '\nLive-boot entry path:\n'
++    printf '  1) Embedded PMOSLIVE (menu option 3; default)\n'
++    printf '  2) Upload PMOSLIVE through RAM loader (menu option 1)\n'
++    printf '  3) Try embedded, then fall back to RAM upload after a reset\n'
++    while :; do
++        read -r -p 'Select live-boot path [1]: ' choice
++        case ${choice:-1} in
++            1) LIVEBOOT_PATH=embedded; return ;;
++            2) LIVEBOOT_PATH=ram-upload; return ;;
++            3) LIVEBOOT_PATH=auto; return ;;
++            *) warn 'invalid selection' ;;
++        esac
++    done
++}
++
+ expected_rootfs_hash() {
+     if [[ $2 == full ]]; then
+         dd if="$1" bs=1048576 skip=3 count=8 status=none | sha256sum | awk '{print $1}'
+@@ -333,6 +418,7 @@
+                     die 'legacy updater mode cannot install an unknown full-flash layout'
+                 ;;
+         esac
++        report_liveboot_capability
+         return
+     fi
+ 
+@@ -358,8 +444,18 @@
+ 
+     printf '\nAvailable %s firmware artifacts:\n' "$MODE"
+     for i in "${!files[@]}"; do
+-        case $MODE in modern) status=manifest ;; checksum) status=checksum ;; legacy) status=legacy ;; esac
+-        printf '  %d) %-9s %-10s %-8s %s\n' "$((i + 1))" "${types[$i]}" \
++        case $MODE in
++            modern)
++                if [[ ${types[$i]} == full ]] && manifest_declares_liveboot "${files[$i]}"; then
++                    status=manifest+live
++                else
++                    status=manifest
++                fi
++                ;;
++            checksum) status=checksum ;;
++            legacy) status=legacy ;;
++        esac
++        printf '  %d) %-9s %-10s %-13s %s\n' "$((i + 1))" "${types[$i]}" \
+             "$(human_size "${sizes[$i]}")" "$status" "$(basename -- "${files[$i]}")"
+     done
+     while :; do
+@@ -370,6 +466,7 @@
+         }
+         SELECTED_FIRMWARE=${files[$((choice - 1))]}
+         SELECTED_TYPE=${types[$((choice - 1))]}
++        report_liveboot_capability
+         return
+     done
+ }
+@@ -513,12 +610,25 @@
+ select_operation() {
+     local choice
+     (( OPERATION_PRESELECTED == 0 )) || return 0
+-    printf '\nOperation:\n'
+-    printf '  1) Verify download, checksum, manifest/metadata, board, and layout\n'
+-    printf '  2) Dry run; stage and prepare without stopping services or writing flash\n'
+-    printf '  3) Flash firmware and reboot\n'
+-    printf '  4) Force flash/reinstall/downgrade and reboot\n'
+-    printf '  5) Preflight pre-boot UART + SPI NOR read/erase/program/readback/restore\n'
++    printf '
++Operation:
++'
++    printf '  1) Verify download, checksum, manifest/metadata, board, and layout
++'
++    printf '  2) Dry run; stage and prepare without stopping services or writing flash
++'
++    printf '  3) Flash firmware and reboot
++'
++    printf '  4) Force flash/reinstall/downgrade and reboot
++'
++    printf '  5) Preflight pre-boot UART + SPI NOR read/erase/program/readback/restore
++'
++    printf '  6) Verify PMOSLIVE capability locally (no serial connection)
++'
++    printf '  7) PMOSLIVE dry run; transfer and validate without entering Linux
++'
++    printf '  8) Live boot the selected image entirely from RAM (no flash writes)
++'
+     while :; do
+         read -r -p 'Select operation [1]: ' choice
+         case ${choice:-1} in
+@@ -527,6 +637,9 @@
+             3) OPERATION=flash; OPERATION_ARGS=(); return ;;
+             4) OPERATION=flash; OPERATION_ARGS=(--force); FORCE_FLASH=1; return ;;
+             5) OPERATION=preflight; OPERATION_ARGS=(); BOOTLOADER_RECOVERY=1; CONTROL_PATH=bootloader; return ;;
++            6) OPERATION=liveboot-verify; OPERATION_ARGS=(); LIVEBOOT=1; CONTROL_PATH=liveboot; return ;;
++            7) OPERATION=liveboot-dry-run; OPERATION_ARGS=(); LIVEBOOT=1; CONTROL_PATH=liveboot; return ;;
++            8) OPERATION=liveboot; OPERATION_ARGS=(); LIVEBOOT=1; CONTROL_PATH=liveboot; return ;;
+             *) warn 'invalid selection' ;;
+         esac
+     done
+@@ -1013,6 +1126,93 @@
+     log "serial-controlled $OPERATION completed"
+ }
+ 
++
++run_liveboot_mode() {
++    local default_payload payload_descriptor live_operation args=() log_file rc
++    need python3
++    [[ -x $SCRIPT_DIR/serial-runner.py ]] || die 'serial-runner.py helper is missing or not executable'
++    [[ -x $SCRIPT_DIR/bootloader-liveboot.py ]] || die 'bootloader-liveboot.py helper is missing or not executable'
++    [[ -f $SCRIPT_DIR/bootloader_protocol.py && -f $SCRIPT_DIR/pmosrec_v3.py ]] || \
++        die 'PMOSLIVE protocol helpers are missing'
++    activate_liveboot
++    [[ -n $TARGET_MODEL ]] || TARGET_MODEL=$(prompt_default 'Exact live-boot target model' 'MS42P')
++    case $TARGET_MODEL in
++        MS42|MS42P) ;;
++        *) die "PMOSLIVE currently supports MS42 and MS42P only: $TARGET_MODEL" ;;
++    esac
++    case $OPERATION in
++        liveboot-verify) live_operation=verify ;;
++        liveboot-dry-run) live_operation=dry-run ;;
++        liveboot) live_operation=boot ;;
++        *) die "invalid PMOSLIVE operation: $OPERATION" ;;
++    esac
++
++    default_payload="$ARTIFACTS_DIR/liveboot/pmoslive-jaguar1.bin"
++    if [[ $LIVEBOOT_PATH == ram-upload || $LIVEBOOT_PATH == auto || -n $LIVEBOOT_PAYLOAD ]]; then
++        [[ -n $LIVEBOOT_PAYLOAD ]] || LIVEBOOT_PAYLOAD=$default_payload
++        [[ -f $LIVEBOOT_PAYLOAD ]] || die "standalone PMOSLIVE payload not found: $LIVEBOOT_PAYLOAD"
++        payload_descriptor=$LIVEBOOT_PAYLOAD_DESCRIPTOR
++        [[ -n $payload_descriptor ]] || payload_descriptor="${LIVEBOOT_PAYLOAD%.bin}.descriptor.json"
++        [[ -f $payload_descriptor ]] || die "PMOSLIVE payload descriptor not found: $payload_descriptor"
++    fi
++
++    args=(
++        --console-mode liveboot
++        --operation "$live_operation"
++        --liveboot-path "$LIVEBOOT_PATH"
++        --firmware "$SELECTED_FIRMWARE"
++        --manifest "$SELECTED_FIRMWARE.manifest.json"
++        --target-model "$TARGET_MODEL"
++    )
++    if [[ -n $LIVEBOOT_PAYLOAD ]]; then
++        args+=(--payload "$LIVEBOOT_PAYLOAD" --payload-descriptor "$payload_descriptor")
++    fi
++    (( FORCE_FLASH )) && args+=(--force)
++    (( MANUAL_TARGET_CONFIRMATION )) && args+=(--manual-target-confirmation)
++    (( VERBOSE_ACKS )) && args+=(--verbose-acks)
++    (( SKIP_BAUD_NEGOTIATION )) && args+=(--skip-baud-negotiation)
++    (( DIAGNOSTIC_BAUD_SCAN )) && args+=(--diagnostic-baud-scan)
++    (( DIAGNOSTIC_WINDOW_SCAN )) && args+=(--diagnostic-window-scan)
++
++    printf '\nPre-kernel PMOSLIVE\n'
++    printf 'Operation:         %s\n' "$live_operation"
++    printf 'Target model:      %s (Jaguar1)\n' "$TARGET_MODEL"
++    printf 'Selected firmware: %s\n' "$SELECTED_FIRMWARE"
++    printf 'Live-boot path:    %s\n' "$LIVEBOOT_PATH"
++    printf 'Flash access:      none (PMOSLIVE contract)\n'
++    if [[ -n $LIVEBOOT_PAYLOAD ]]; then
++        printf 'External payload:  %s\n' "$LIVEBOOT_PAYLOAD"
++    else
++        printf 'External payload:  not required (embedded menu option 3)\n'
++    fi
++
++    if [[ $live_operation == verify ]]; then
++        python3 "$SCRIPT_DIR/serial-runner.py" "${args[@]}"
++        return
++    fi
++
++    select_serial_device
++    ensure_serial_access
++    args+=(--device "$SERIAL_DEVICE")
++    printf 'Serial device:     %s, 115200 8N1, PMOSREC v3 binary transport\n\n' "$SERIAL_DEVICE"
++    if [[ $live_operation == boot ]]; then
++        prompt_yes_no 'Begin non-destructive RAM live boot?' y || die 'cancelled'
++    else
++        prompt_yes_no 'Begin non-destructive PMOSLIVE transfer and validation dry run?' y || die 'cancelled'
++    fi
++    mkdir -p "$LOG_DIR"
++    log_file="$LOG_DIR/bootloader-liveboot-${TARGET_MODEL}-$(date +%Y%m%d-%H%M%S).log"
++    printf 'Live-boot log:     %s\n' "$log_file"
++    set +e
++    SUPPRESS_ERR_REPORT=1
++    python3 "$SCRIPT_DIR/serial-runner.py" "${args[@]}" 2>&1 | tee "$log_file"
++    rc=${PIPESTATUS[0]}
++    SUPPRESS_ERR_REPORT=0
++    set -e
++    (( rc == 0 )) || die "PMOSLIVE operation ended with status $rc; inspect $log_file"
++    log "PMOSLIVE $live_operation completed"
++}
++
+ run_bootloader_recovery_mode() {
+     local family default_payload preflight_receipt args=()
+     need python3
+@@ -1154,7 +1354,7 @@
+     printf UBT0 | dd of="$TMP/alternate-boot.bin" bs=1 seek=$((0x40000)) conv=notrunc status=none
+     [[ $(classify_firmware "$TMP/alternate-boot.bin") == raw-full ]] || die 'alternate boot-chain classification self-test failed'
+     if [[ ${FIRMWARE_FLASHER_SELFTEST_QUICK:-0} != 1 ]]; then
+-        python3 - "$SCRIPT_DIR/tftp-server.py" "$SCRIPT_DIR/serial-runner.py" "$SCRIPT_DIR/bootloader-ramload.py" "$SCRIPT_DIR/bootloader_protocol.py" "$SCRIPT_DIR/pmosrec_v3.py" <<'PY_SYNTAX'
++        python3 - "$SCRIPT_DIR/tftp-server.py" "$SCRIPT_DIR/serial-runner.py" "$SCRIPT_DIR/bootloader-ramload.py" "$SCRIPT_DIR/bootloader-liveboot.py" "$SCRIPT_DIR/bootloader_protocol.py" "$SCRIPT_DIR/pmosrec_v3.py" <<'PY_SYNTAX'
+ from pathlib import Path
+ import sys
+ for source in sys.argv[1:]:
+@@ -1162,7 +1362,7 @@
+ PY_SYNTAX
+         python3 -m unittest discover -s "$SCRIPT_DIR/tests" -p 'test_*.py' -v
+     fi
+-    log 'TFTP, artifact bundles, image classification, and UART recovery protocol self-tests passed'
++    log 'TFTP, artifact bundles, live-boot capability, image classification, and UART protocol self-tests passed'
+ }
+ 
+ main() {
+@@ -1172,10 +1372,17 @@
+             --artifacts) (($# >= 2)) || die '--artifacts requires a directory'; ARTIFACTS_DIR=$2; shift 2 ;;
+             --firmware) (($# >= 2)) || die '--firmware requires a file'; SELECTED_FIRMWARE=$2; shift 2 ;;
+             --tftp-port) (($# >= 2)) || die '--tftp-port requires a port'; TFTP_PORT=$2; shift 2 ;;
+-            --control) (($# >= 2)) || die '--control requires ssh or serial'; CONTROL_PATH=$2; shift 2 ;;
++            --control) (($# >= 2)) || die '--control requires ssh, serial, bootloader, or liveboot'; CONTROL_PATH=$2; shift 2 ;;
+             --transport) (($# >= 2)) || die '--transport requires tftp or uart'; TRANSPORT=$2; shift 2 ;;
+             --bootloader-recovery) BOOTLOADER_RECOVERY=1; CONTROL_PATH=bootloader; FLASH_SCOPE=full; FLASH_SCOPE_REQUESTED=1; shift ;;
+             --bootloader-preflight) BOOTLOADER_RECOVERY=1; CONTROL_PATH=bootloader; FLASH_SCOPE=full; FLASH_SCOPE_REQUESTED=1; OPERATION=preflight; OPERATION_PRESELECTED=1; shift ;;
++            --liveboot) LIVEBOOT=1; CONTROL_PATH=liveboot; OPERATION=liveboot; OPERATION_PRESELECTED=1; shift ;;
++            --liveboot-dry-run) LIVEBOOT=1; CONTROL_PATH=liveboot; OPERATION=liveboot-dry-run; OPERATION_PRESELECTED=1; shift ;;
++            --liveboot-verify) LIVEBOOT=1; CONTROL_PATH=liveboot; OPERATION=liveboot-verify; OPERATION_PRESELECTED=1; shift ;;
++            --liveboot-path) (($# >= 2)) || die '--liveboot-path requires embedded, ram-upload, or auto'; LIVEBOOT_PATH=$2; shift 2 ;;
++            --liveboot-payload) (($# >= 2)) || die '--liveboot-payload requires a file'; LIVEBOOT_PAYLOAD=$2; shift 2 ;;
++            --liveboot-descriptor) (($# >= 2)) || die '--liveboot-descriptor requires a file'; LIVEBOOT_PAYLOAD_DESCRIPTOR=$2; shift 2 ;;
++            --liveboot-force) FORCE_FLASH=1; shift ;;
+             --recovery-path) (($# >= 2)) || die '--recovery-path requires embedded, auto, or ram-upload'; BOOTLOADER_RECOVERY_PATH=$2; shift 2 ;;
+             --recovery-payload) (($# >= 2)) || die '--recovery-payload requires a file'; BOOTLOADER_PAYLOAD=$2; shift 2 ;;
+             --target-model) (($# >= 2)) || die '--target-model requires a model'; TARGET_MODEL=$2; shift 2 ;;
+@@ -1197,26 +1404,29 @@
+             *) die "unknown option: $1" ;;
+         esac
+     done
+-    [[ $CONTROL_PATH == '' || $CONTROL_PATH == ssh || $CONTROL_PATH == serial || $CONTROL_PATH == bootloader ]] || die '--control must be ssh, serial, or bootloader'
++    [[ $CONTROL_PATH == '' || $CONTROL_PATH == ssh || $CONTROL_PATH == serial || $CONTROL_PATH == bootloader || $CONTROL_PATH == liveboot ]] || die '--control must be ssh, serial, bootloader, or liveboot'
+     [[ $TRANSPORT == tftp || $TRANSPORT == uart ]] || die '--transport must be tftp or uart'
+     [[ $MODE == modern || $MODE == checksum || $MODE == legacy ]] || die 'invalid firmware contract mode'
+-    [[ $TRANSPORT != uart || -z $CONTROL_PATH || $CONTROL_PATH == serial || $CONTROL_PATH == bootloader ]] || die '--transport uart requires --control serial or bootloader'
++    [[ $TRANSPORT != uart || -z $CONTROL_PATH || $CONTROL_PATH == serial || $CONTROL_PATH == bootloader || $CONTROL_PATH == liveboot ]] || die '--transport uart requires --control serial, bootloader, or liveboot'
+     [[ $TRANSPORT != uart || $MODE != legacy ]] || die '--transport uart is unavailable with --legacy'
+     [[ $FLASH_SCOPE == system || $FLASH_SCOPE == full ]] || die 'invalid flash scope'
+     [[ ${#FIRMWARE_VERSION} -le 127 && $FIRMWARE_VERSION != *$'\n'* && $FIRMWARE_VERSION != *$'\r'* ]] || die 'invalid version hint'
+     [[ $MODE != legacy || $FLASH_SCOPE != full ]] || die '--full-flash is unavailable with --legacy'
+     [[ $BOOTLOADER_RECOVERY -eq 0 || $MODE == modern ]] || die '--bootloader-recovery requires --modern'
+     [[ $BOOTLOADER_RECOVERY_PATH == embedded || $BOOTLOADER_RECOVERY_PATH == auto || $BOOTLOADER_RECOVERY_PATH == ram-upload ]] || die '--recovery-path must be embedded, auto, or ram-upload'
++    [[ $LIVEBOOT_PATH == embedded || $LIVEBOOT_PATH == auto || $LIVEBOOT_PATH == ram-upload ]] || die '--liveboot-path must be embedded, auto, or ram-upload'
+     [[ $PREFLIGHT_SCRATCH =~ ^(0[xX][0-9a-fA-F]+|[0-9]+)$ ]] || die '--preflight-scratch must be a numeric address'
+     if [[ $CONTROL_PATH == bootloader ]]; then
+         BOOTLOADER_RECOVERY=1
+         FLASH_SCOPE=full
+         FLASH_SCOPE_REQUESTED=1
++    elif [[ $CONTROL_PATH == liveboot ]]; then
++        LIVEBOOT=1
+     fi
+     [[ $TFTP_PORT =~ ^[0-9]+$ ]] && (( TFTP_PORT >= 1024 && TFTP_PORT <= 65535 )) || die 'TFTP port must be from 1024 through 65535'
+ 
+     for command in bash python3 sha256sum dd awk stat od tr readlink truncate head tee; do need "$command"; done
+-    [[ -x $SCRIPT_DIR/tftp-server.py && -x $SCRIPT_DIR/serial-runner.py ]] || die 'private flasher helpers are missing or not executable'
++    [[ -x $SCRIPT_DIR/tftp-server.py && -x $SCRIPT_DIR/serial-runner.py && -x $SCRIPT_DIR/bootloader-liveboot.py ]] || die 'private flasher helpers are missing or not executable'
+     (( self_test_requested )) && { self_test; return; }
+     for command in find ip sort; do need "$command"; done
+ 
+@@ -1229,9 +1439,20 @@
+         FLASH_SCOPE_REQUESTED=1
+     else
+         select_firmware
+-        select_flash_scope
+         prepare_version_hint
+         select_operation
++        if is_liveboot_operation || (( LIVEBOOT )); then
++            activate_liveboot
++            (( OPERATION_PRESELECTED )) || select_liveboot_path
++        else
++            select_flash_scope
++        fi
++    fi
++
++    if (( LIVEBOOT )); then
++        is_liveboot_operation || die '--control liveboot requires --liveboot, --liveboot-dry-run, or --liveboot-verify'
++        run_liveboot_mode
++        return
+     fi
+ 
+     if (( BOOTLOADER_RECOVERY )); then
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' '--exclude=PMOSLIVE-FLASHER-INTEGRATION.patch' a/tools/firmware-flasher/serial-runner.py b/tools/firmware-flasher/serial-runner.py
+--- a/tools/firmware-flasher/serial-runner.py	2026-06-30 10:08:42.000000000 +0000
++++ b/tools/firmware-flasher/serial-runner.py	2026-07-19 16:11:17.293298374 +0000
+@@ -11,6 +11,7 @@
+ import base64
+ import binascii
+ import hashlib
++import importlib.util
+ import fcntl
+ import os
+ import re
+@@ -18,6 +19,7 @@
+ import sys
+ import termios
+ import time
++from pathlib import Path
+ 
+ 
+ def configure_serial(fd: int, baud: int) -> None:
+@@ -125,13 +127,67 @@
+     wait_serial(fd, re.compile(r"PMOSUART/1 COMPLETE firmware="), timeout)
+     print("\n[serial] UART objects reconstructed and verified on the switch", flush=True)
+ 
++
++def run_liveboot_console(args: argparse.Namespace) -> int:
++    """Dispatch the pre-kernel PMOSLIVE state machine through this serial helper."""
++    helper = Path(__file__).with_name("bootloader-liveboot.py")
++    spec = importlib.util.spec_from_file_location("postmerkos_bootloader_liveboot", helper)
++    if spec is None or spec.loader is None:
++        print(f"[serial] unable to load PMOSLIVE helper: {helper}", file=sys.stderr)
++        return 2
++    module = importlib.util.module_from_spec(spec)
++    sys.modules[spec.name] = module
++    spec.loader.exec_module(module)
++    forwarded = [
++        "--operation", args.operation,
++        "--liveboot-path", args.liveboot_path,
++        "--firmware", args.firmware,
++        "--target-model", args.target_model,
++        "--baud", str(args.baud),
++        "--chunk-size", str(args.liveboot_chunk_size),
++        "--frame-retries", str(args.liveboot_frame_retries),
++        "--ack-timeout", str(args.liveboot_ack_timeout),
++        "--ready-timeout", str(args.liveboot_ready_timeout),
++        "--boot-timeout", str(args.liveboot_boot_timeout),
++    ]
++    if args.device:
++        forwarded += ["--port", args.device]
++    if args.manifest:
++        forwarded += ["--manifest", args.manifest]
++    if args.payload:
++        forwarded += ["--payload", args.payload]
++    if args.payload_descriptor:
++        forwarded += ["--payload-descriptor", args.payload_descriptor]
++    for enabled, flag in (
++        (args.force, "--force"),
++        (args.manual_target_confirmation, "--manual-target-confirmation"),
++        (args.skip_baud_negotiation, "--skip-baud-negotiation"),
++        (args.diagnostic_baud_scan, "--diagnostic-baud-scan"),
++        (args.diagnostic_window_scan, "--diagnostic-window-scan"),
++        (args.verbose_acks, "--verbose-acks"),
++    ):
++        if enabled:
++            forwarded.append(flag)
++    try:
++        return int(module.main(forwarded))
++    except module.ProtocolError as exc:
++        print(f"PMOSLIVE error: {exc}", file=sys.stderr)
++        return 1
++
++
+ def main() -> int:
+-    parser = argparse.ArgumentParser()
+-    parser.add_argument("--device", required=True)
++    parser = argparse.ArgumentParser(
++        description=(
++            "Drive either the running postmerkOS firmware updater or the pre-kernel "
++            "meraki-redboot PMOSLIVE state machine through hardware serial."
++        )
++    )
++    parser.add_argument("--console-mode", choices=("firmware", "liveboot"), default="firmware")
++    parser.add_argument("--device")
+     parser.add_argument("--username", default="root")
+-    parser.add_argument("--password-file", required=True)
+-    parser.add_argument("--command", required=True)
+-    parser.add_argument("--operation", choices=("verify", "dry-run", "flash"), required=True)
++    parser.add_argument("--password-file")
++    parser.add_argument("--command")
++    parser.add_argument("--operation", choices=("verify", "dry-run", "flash", "boot"), required=True)
+     parser.add_argument("--mode", choices=("modern", "checksum", "legacy"), default="modern")
+     parser.add_argument("--accept-untested", action="store_true")
+     parser.add_argument("--accept-full-flash", action="store_true")
+@@ -140,7 +196,40 @@
+     parser.add_argument("--uart-firmware")
+     parser.add_argument("--uart-manifest")
+     parser.add_argument("--uart-chunk", type=int, default=1024)
++
++    live = parser.add_argument_group("PMOSLIVE pre-kernel mode")
++    live.add_argument("--liveboot-path", choices=("embedded", "ram-upload", "auto"), default="embedded")
++    live.add_argument("--payload")
++    live.add_argument("--payload-descriptor")
++    live.add_argument("--firmware")
++    live.add_argument("--manifest")
++    live.add_argument("--target-model", default="MS42P")
++    live.add_argument("--force", action="store_true")
++    live.add_argument("--manual-target-confirmation", action="store_true")
++    live.add_argument("--skip-baud-negotiation", action="store_true")
++    live.add_argument("--diagnostic-baud-scan", action="store_true")
++    live.add_argument("--diagnostic-window-scan", action="store_true")
++    live.add_argument("--verbose-acks", action="store_true")
++    live.add_argument("--liveboot-chunk-size", type=int, default=1024)
++    live.add_argument("--liveboot-frame-retries", type=int, default=3)
++    live.add_argument("--liveboot-ack-timeout", type=float, default=5.0)
++    live.add_argument("--liveboot-ready-timeout", type=float, default=90.0)
++    live.add_argument("--liveboot-boot-timeout", type=float, default=120.0)
+     args = parser.parse_args()
++
++    if args.console_mode == "liveboot":
++        if args.operation not in {"verify", "dry-run", "boot"}:
++            parser.error("PMOSLIVE --operation must be verify, dry-run, or boot")
++        if not args.firmware:
++            parser.error("PMOSLIVE mode requires --firmware")
++        if args.operation != "verify" and not args.device:
++            parser.error("PMOSLIVE dry-run/boot requires --device")
++        return run_liveboot_console(args)
++
++    if args.operation not in {"verify", "dry-run", "flash"}:
++        parser.error("firmware console mode supports verify, dry-run, or flash")
++    if not args.device or not args.password_file or not args.command:
++        parser.error("firmware console mode requires --device, --password-file, and --command")
+     if args.uart_chunk < 192 or args.uart_chunk > 3072:
+         parser.error("--uart-chunk must be 192-3072 bytes")
+     if args.uart_manifest and not args.uart_firmware:
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' '--exclude=PMOSLIVE-FLASHER-INTEGRATION.patch' a/tools/firmware-flasher/tests/test_bootloader_protocol.py b/tools/firmware-flasher/tests/test_bootloader_protocol.py
+--- a/tools/firmware-flasher/tests/test_bootloader_protocol.py	2026-07-19 01:55:14.000000000 +0000
++++ b/tools/firmware-flasher/tests/test_bootloader_protocol.py	2026-07-19 16:12:37.870678744 +0000
+@@ -695,6 +695,24 @@
+             self.assertEqual(result.returncode, 0, result.stderr)
+             self.assertIn("without opening the serial port", result.stdout)
+ 
++    def test_non_live_bundle_is_flashable_but_not_liveboot_capable(self) -> None:
++        with tempfile.TemporaryDirectory() as temp:
++            bundle = BundleFixture(Path(temp))
++            manifest = json.loads(bundle.manifest.read_text())
++            manifest["recovery"].pop("uart_liveboot", None)
++            loader = manifest["recovery"]["uart_ramloader"]
++            loader["boot_menu"]["options"].pop("3", None)
++            loader.pop("embedded_liveboot", None)
++            bundle.manifest.write_text(json.dumps(manifest) + "\n")
++
++            info = bp.validate_bundle(bundle.image, bundle.manifest, "MS42P", force=False)
++            self.assertEqual(info.family, "jaguar1")
++            with self.assertRaisesRegex(bp.ProtocolError, "PMOSLIVE|liveboot|menu option 3"):
++                bp.validate_bundle(
++                    bundle.image, bundle.manifest, "MS42P", force=False,
++                    require_liveboot=True,
++                )
++
+     def test_liveboot_verify_validates_payload_without_opening_serial(self) -> None:
+         with tempfile.TemporaryDirectory() as temp:
+             root = Path(temp)
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' '--exclude=PMOSLIVE-FLASHER-INTEGRATION.patch' a/tools/firmware-flasher/tests/test_flasher_control_flow.sh b/tools/firmware-flasher/tests/test_flasher_control_flow.sh
+--- a/tools/firmware-flasher/tests/test_flasher_control_flow.sh	2026-06-30 10:08:42.000000000 +0000
++++ b/tools/firmware-flasher/tests/test_flasher_control_flow.sh	2026-07-19 16:17:55.049536601 +0000
+@@ -134,3 +134,65 @@
+     <<<"$preflight_cli_output"
+ 
+ echo 'PASS: firmware-flasher direct preflight does not require a firmware image'
++
++# PMOSLIVE must be visible as both interactive operations and explicit CLI modes.
++for entry in '6 liveboot-verify' '7 liveboot-dry-run' '8 liveboot'; do
++    read -r choice expected <<<"$entry"
++    actual=$(printf '%s\n' "$choice" | bash -Eeuo pipefail -c '
++        source "$1"
++        select_operation >/dev/null
++        printf "%s" "$OPERATION"
++    ' bash "$FLASHER")
++    [[ $actual == "$expected" ]]
++done
++
++liveboot_cli_output=$(
++    bash -Eeuo pipefail -c '
++        source "$1"
++        need() { :; }
++        select_firmware() { SELECTED_FIRMWARE=/tmp/live.bin; SELECTED_TYPE=full; }
++        manifest_declares_liveboot() { return 0; }
++        run_liveboot_mode() {
++            printf "REACHED-LIVEBOOT operation=%s path=%s control=%s\n" \
++                "$OPERATION" "$LIVEBOOT_PATH" "$CONTROL_PATH"
++        }
++        main --liveboot-verify --liveboot-path embedded --target-model MS42P
++    ' bash "$FLASHER" 2>&1
++)
++grep -Fq 'REACHED-LIVEBOOT operation=liveboot-verify path=embedded control=liveboot' <<<"$liveboot_cli_output"
++
++# Interactive PMOSLIVE selection must also expose the entry-path prompt.
++interactive_liveboot_output=$(printf '7\n2\n' | bash -Eeuo pipefail -c '
++    source "$1"
++    need() { :; }
++    select_firmware() { SELECTED_FIRMWARE=/tmp/live.bin; SELECTED_TYPE=full; }
++    manifest_declares_liveboot() { return 0; }
++    run_liveboot_mode() {
++        printf "REACHED-INTERACTIVE-LIVEBOOT operation=%s path=%s control=%s\n" \
++            "$OPERATION" "$LIVEBOOT_PATH" "$CONTROL_PATH"
++    }
++    main
++' bash "$FLASHER" 2>&1)
++grep -Fq 'REACHED-INTERACTIVE-LIVEBOOT operation=liveboot-dry-run path=ram-upload control=liveboot' \
++    <<<"$interactive_liveboot_output"
++
++# A valid modern image without PMOSLIVE metadata must still reach normal flashing.
++nonlive_flash_output=$(
++    bash -Eeuo pipefail -c '
++        source "$1"
++        need() { :; }
++        select_firmware() { SELECTED_FIRMWARE=/tmp/nonlive.bin; SELECTED_TYPE=full; }
++        manifest_declares_liveboot() { return 1; }
++        select_operation() { OPERATION=verify; OPERATION_ARGS=(--verify-only); }
++        select_flash_scope() { FLASH_SCOPE=system; }
++        select_overlay_policy() { OVERLAY_POLICY=preserve; }
++        run_ssh_mode() { printf "REACHED-NONLIVE-FLASH operation=%s scope=%s\n" "$OPERATION" "$FLASH_SCOPE"; }
++        main --control ssh
++    ' bash "$FLASHER" 2>&1
++)
++grep -Fq 'REACHED-NONLIVE-FLASH operation=verify scope=system' <<<"$nonlive_flash_output"
++
++grep -Fq -- '--liveboot' < <("$FLASHER" --help)
++grep -Fq -- '--console-mode {firmware,liveboot}' < <(python3 "$(dirname "$FLASHER")/serial-runner.py" --help)
++
++echo 'PASS: firmware-flasher PMOSLIVE CLI exposure and non-live flashing gate'
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' '--exclude=PMOSLIVE-FLASHER-INTEGRATION.patch' a/tools/firmware-flasher/tests/test_liveboot_console.py b/tools/firmware-flasher/tests/test_liveboot_console.py
+--- a/tools/firmware-flasher/tests/test_liveboot_console.py	1970-01-01 00:00:00.000000000 +0000
++++ b/tools/firmware-flasher/tests/test_liveboot_console.py	2026-07-19 16:14:38.610340632 +0000
+@@ -0,0 +1,116 @@
++from __future__ import annotations
++
++import importlib.util
++import sys
++import unittest
++from pathlib import Path
++from unittest import mock
++
++TOOL_DIR = Path(__file__).resolve().parents[1]
++
++
++def load_module(name: str, filename: str):
++    spec = importlib.util.spec_from_file_location(name, TOOL_DIR / filename)
++    assert spec is not None and spec.loader is not None
++    module = importlib.util.module_from_spec(spec)
++    sys.modules[name] = module
++    spec.loader.exec_module(module)
++    return module
++
++
++bl = load_module("test_bootloader_liveboot", "bootloader-liveboot.py")
++pv3 = load_module("test_pmosrec_v3_live", "pmosrec_v3.py")
++
++
++class LivebootConsoleTests(unittest.TestCase):
++    def ready_sequence(self) -> list[str]:
++        return [
++            "PMOSLIVE READY 3 SOC=jaguar1 FAMILY=00000002 FLASH=0",
++            (
++                "PMOSLIVE DESCRIPTOR PMOSLIVE3;SOC=jaguar1;FAMILY=2;PROTO=3;FLASH=0;LIVEBOOT=1;"
++                "IMAGE_BYTES=16777216;KERNEL=81000000;ROOTFS=87000000;MEM_MIB=120;"
++                "FRAME_MAX=4096;WINDOW_MAX=16;SPARSE=1;LZ4=1;END"
++            ),
++            "PMOSLIVE RAM-MAP KERNEL=81000000 IMAGE=81400000 MANIFEST=82400000 PAYLOAD=86c00000 ROOTFS=87000000",
++            "PMOSLIVE UART-CAP BAUDTEST=1 FRAME_MAX=4096 WINDOW_MAX=16",
++            "PMOSLIVE COMMAND-READY 3",
++        ]
++
++    def test_embedded_menu_sequence_selects_option_three(self) -> None:
++        link = mock.Mock()
++        link.wait_for.side_effect = [
++            "PMOSBOOT MENU-PROBE TIMEOUT_MS=00000bb8",
++            "PMOSBOOT PASS-MENU-TRIGGER: BYTE: 0x0000000D",
++            "PMOSBOOT MENU 1=UART-RAMLOADER 2=FW-RECOVERY 3=LIVEBOOT",
++            "PMOSBOOT MENU-READY TIMEOUT_MS=00001388",
++            "PMOSBOOT PASS-MENU-CHOICE: SELECTED: 0x00000003",
++            "PMOSBOOT INFO-LIVEBOOT: SOURCE: MENU-OPTION-3 | SOC: jaguar1",
++            "PMOSBOOT PASS-LIVEBOOT-COPY",
++            "PMOSBOOT PASS-LIVEBOOT-EXEC",
++            *self.ready_sequence(),
++        ]
++        selected = bl.enter_liveboot(link, "embedded", 30.0, None, 1024, 3, 5.0)
++        self.assertEqual(selected, "embedded")
++        self.assertEqual(link.write_all.call_args_list[:2], [mock.call(b"\r"), mock.call(b"3")])
++
++    def test_ram_upload_sequence_selects_option_one_and_executes_payload(self) -> None:
++        link = mock.Mock()
++        link.wait_for.side_effect = [
++            "PMOSBOOT MENU-PROBE TIMEOUT_MS=00000bb8",
++            "PMOSBOOT PASS-MENU-TRIGGER: BYTE: 0x0000000D",
++            "PMOSBOOT MENU 1=UART-RAMLOADER 2=FW-RECOVERY 3=LIVEBOOT",
++            "PMOSBOOT MENU-READY TIMEOUT_MS=00001388",
++            "PMOSBOOT PASS-MENU-CHOICE: SELECTED: 0x00000001",
++            "PMOSRAM READY 2",
++            *self.ready_sequence(),
++        ]
++        payload = bl.LivePayload(Path("payload.bin"), 4, "0" * 64, 0x86C00000, 0x86C00000)
++        with mock.patch.object(Path, "read_bytes", return_value=b"test"), \
++             mock.patch.object(bl, "send_ram_payload") as send_payload:
++            selected = bl.enter_liveboot(link, "ram-upload", 30.0, payload, 1024, 3, 5.0)
++        self.assertEqual(selected, "ram-upload")
++        self.assertEqual(link.write_all.call_args_list[:2], [mock.call(b"\r"), mock.call(b"1")])
++        send_payload.assert_called_once()
++
++    def test_liveboot_handoff_restores_115200_and_recognizes_linux(self) -> None:
++        link = mock.Mock()
++        link.buffer = bytearray(b"stale")
++        link.wait_for.side_effect = [
++            "PMOS3 LIVEBOOT-READY",
++            "PMOS3 LIVEBOOT-HEADER-ACK flags=00000002",
++            "PMOS3 MANIFEST-OBJECT-VERIFIED",
++            "PMOS3 MANIFEST-ACCEPTED",
++            "PMOS3 IMAGE-OBJECT-VERIFIED",
++            "PMOSLIVE SPIM-VERIFIED LOAD=81000000 ENTRY=81000000",
++            "PMOSLIVE SQUASHFS-VERIFIED ADDRESS=87000000",
++            "PMOSLIVE RESULT IMAGE-READY",
++            "PMOSLIVE BOOT-CHALLENGE deadbeef",
++            "PMOSLIVE CONFIRMATION-WAIT COMMAND=BOOTRAM",
++            "PMOSLIVE CONFIRMATION-ACK",
++            "PMOSLIVE BOOT-PLAN MEM=120M",
++            "PMOSLIVE UART-RESTORE RATE=115200 FROM=921600",
++            "PMOSLIVE UART-BASELINE-READY RATE=115200",
++            "PMOSLIVE EXEC ENTRY=81000000",
++            "Linux version 3.18.123-test",
++        ]
++        selection = pv3.TransportSelection(921600, 4096, 1, True, True, True)
++        plan = pv3.RepresentationPlan(pv3.REP_RAW, 4096, ())
++        bundle = mock.Mock(image=Path("image.bin"), manifest_bytes=b"{}")
++        controller = mock.Mock()
++        with mock.patch.object(pv3, "choose_representation", return_value=plan), \
++             mock.patch.object(pv3, "make_manifest_plan", return_value=plan), \
++             mock.patch.object(pv3, "make_live_package_header", return_value=b"header"), \
++             mock.patch.object(pv3, "send_frames"):
++            result = pv3.send_liveboot_v3(
++                link, bundle, selection, dry_run=False, force=False,
++                baud_controller=controller,
++            )
++        self.assertEqual(result, "Linux version 3.18.123-test")
++        self.assertIn(mock.call(b"PMOS3 LIVEBOOT\n"), link.write_all.call_args_list)
++        self.assertIn(mock.call(b"BOOTRAM deadbeef\n"), link.write_all.call_args_list)
++        controller.set_rate.assert_called_once_with(115200, flush=True)
++        self.assertEqual(link.buffer, bytearray())
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' '--exclude=PMOSLIVE-FLASHER-INTEGRATION.patch' a/tools/fwupdate-smoke-test/host-smoke-test.sh b/tools/fwupdate-smoke-test/host-smoke-test.sh
+--- a/tools/fwupdate-smoke-test/host-smoke-test.sh	2026-07-19 00:25:42.000000000 +0000
++++ b/tools/fwupdate-smoke-test/host-smoke-test.sh	2026-07-19 16:20:45.735606225 +0000
+@@ -63,8 +63,8 @@
+ printf 'PMOSRAM READY 2' | dd of="$TMP/test.bin" bs=1 seek=$((0x100)) conv=notrunc status=none
+ printf SPIM | dd of="$TMP/test.bin" bs=1 seek=$((0x40000)) conv=notrunc status=none
+ printf hsqs | dd of="$TMP/test.bin" bs=1 seek=$((0x300000)) conv=notrunc status=none
+-mkdir -p "$TMP/recovery"
+-python3 - "$TMP/test.bin" "$TMP/test.bin.manifest.json" "$TMP/loader.manifest.json" "$TMP/recovery" <<'PY'
++mkdir -p "$TMP/recovery" "$TMP/liveboot"
++python3 - "$TMP/test.bin" "$TMP/test.bin.manifest.json" "$TMP/loader.manifest.json" "$TMP/recovery" "$TMP/liveboot" <<'PY'
+ import hashlib
+ import json
+ import os
+@@ -73,8 +73,9 @@
+ import sys
+ import zlib
+ 
+-image, output, loader_output, recovery_raw = sys.argv[1:]
++image, output, loader_output, recovery_raw, liveboot_raw = sys.argv[1:]
+ recovery = Path(recovery_raw)
++liveboot = Path(liveboot_raw)
+ targets = {
+     'luton26': {
+         'id': 1, 'spi': 0x70000064,
+@@ -140,7 +141,7 @@
+     payload_digest = hashlib.sha256(raw).hexdigest()
+     embedded[family] = {
+         'path': str(payload), 'size': len(raw), 'sha256': payload_digest,
+-        'load_address': 0x81000000, 'entry_address': 0x81000000,
++        'load_address': 0x86C00000, 'entry_address': 0x86C00000,
+         'entry_contract': 'flat-binary-byte-zero-v1',
+         'manifest_lookup_contract': 'direct-object-members-v1',
+         'hardware_preflight_contract': 'spi-nor-scratch-rw-restore-loader-crc-v4',
+@@ -158,8 +159,8 @@
+         'accepted_jedec_ids': jedec,
+         'flash_geometry': geometry,
+         'operations': ['verify', 'preflight', 'dry-run', 'flash'],
+-        'load_address': 0x81000000,
+-        'entry_address': 0x81000000,
++        'load_address': 0x86C00000,
++        'entry_address': 0x86C00000,
+         'entry_contract': 'flat-binary-byte-zero-v1',
+         'manifest_lookup_contract': 'direct-object-members-v1',
+         'hardware_preflight_contract': 'spi-nor-scratch-rw-restore-loader-crc-v4',
+@@ -177,6 +178,68 @@
+         json.dumps(descriptor, indent=2, sort_keys=True) + '\n'
+     )
+ 
++live_marker = (
++    b"PMOSLIVE3;SOC=jaguar1;FAMILY=2;PROTO=3;FLASH=0;LIVEBOOT=1;"
++    b"IMAGE_BYTES=16777216;KERNEL=81000000;ROOTFS=87000000;MEM_MIB=120;"
++    b"FRAME_MAX=4096;WINDOW_MAX=16;SPARSE=1;LZ4=1;END"
++)
++live_payload = liveboot / 'pmoslive-jaguar1.bin'
++live_payload.write_bytes(b'smoke-liveboot\0' + live_marker + b'\0')
++live_raw = live_payload.read_bytes()
++live_digest = hashlib.sha256(live_raw).hexdigest()
++live_ram = {
++    'kernel_load_address': 0x81000000,
++    'image_staging_address': 0x81400000,
++    'manifest_address': 0x82400000,
++    'payload_address': 0x86C00000,
++    'squashfs_address': 0x87000000,
++    'boot_params_physical_address': 0x00000400,
++    'boot_params_uncached_address': 0xA0000400,
++    'boot_params_bytes': 0x00000C00,
++    'linux_memory_mib': 120,
++    'top_reserved_mib': 8,
++}
++live_descriptor = {
++    'format': 'postmerkos.uart-liveboot-payload.v1',
++    'protocol_version': 3,
++    'soc_family': 'jaguar1',
++    'soc_family_id': 2,
++    'accepted_models': ['MS42', 'MS42P'],
++    'operations': ['verify', 'dry-run', 'liveboot'],
++    'flash_access': 'none',
++    'load_address': 0x86C00000,
++    'entry_address': 0x86C00000,
++    'entry_contract': 'flat-binary-byte-zero-v1',
++    'transport_contract': 'pmosrec-v3-adaptive-uart-sparse-lz4-v1',
++    'linux_handoff': 'mips-legacy-argc-argv-envp-external-initrd-v1',
++    'rootfs_handoff': 'squashfs-as-legacy-initrd-v1',
++    'image': {'bytes': 0x1000000, 'kernel_offset': 0x40000, 'squashfs_offset': 0x300000},
++    'ram_layout': live_ram,
++    'binary': {'filename': live_payload.name, 'bytes': len(live_raw), 'sha256': live_digest},
++}
++(liveboot / 'pmoslive-jaguar1.descriptor.json').write_text(
++    json.dumps(live_descriptor, indent=2, sort_keys=True) + '\n'
++)
++embedded_live = {
++    'size': len(live_raw),
++    'sha256': live_digest,
++    'load_address': 0x86C00000,
++    'entry_address': 0x86C00000,
++    'entry_contract': 'flat-binary-byte-zero-v1',
++    'flash_access': 'none',
++    'accepted_models': ['MS42', 'MS42P'],
++    'transport_contract': 'pmosrec-v3-adaptive-uart-sparse-lz4-v1',
++    'linux_handoff': 'mips-legacy-argc-argv-envp-external-initrd-v1',
++    'rootfs_handoff': 'squashfs-as-legacy-initrd-v1',
++    'kernel_load_address': 0x81000000,
++    'squashfs_address': 0x87000000,
++    'boot_params_physical_address': 0x00000400,
++    'boot_params_uncached_address': 0xA0000400,
++    'boot_params_bytes': 0x00000C00,
++    'linux_memory_mib': 120,
++    'top_reserved_mib': 8,
++}
++
+ loader = image_data[:0x40000]
+ Path(loader_output).write_text(json.dumps({
+     'format': 'postmerkos.vcoreiii-linuxloader-build.v7',
+@@ -202,11 +265,14 @@
+         'boot_menu': {
+             'probe_timeout_ms': 3000,
+             'selection_timeout_ms': 5000,
+-            'options': {'1': 'uart-ramloader', '2': 'embedded-firmware-recovery'},
++            'options': {'1': 'uart-ramloader', '2': 'embedded-firmware-recovery', '3': 'embedded-liveboot'},
+             'noise_behavior': 'invalid/no explicit option continues normal boot',
+         },
+         'image_check_diagnostics': 'structured-pass-warn-fail-skip-values-v1',
++        'stage1_flash_offset': 0x00020000,
++        'stage1_storage_contract': 'single-shared-boot-region-blob-v1',
+         'embedded_recovery': embedded,
++        'embedded_liveboot': {'jaguar1': embedded_live},
+     },
+ }, indent=2, sort_keys=True) + '\n')
+ PY
+@@ -220,7 +286,7 @@
+ python3 "$ROOT/scripts/write-artifact-manifest.py" \
+     "$TMP/test.bin.manifest.json" "$TMP/ms42p-postmerkos-test.bin.manifest.json" \
+     "$TMP/ms42p-postmerkos-test.bin" "$TMP/rootfs.squashfs" \
+-    "$TMP/loader.manifest.json" "$TMP/recovery"
++    "$TMP/loader.manifest.json" "$TMP/recovery" "$TMP/liveboot"
+ python3 - "$TMP/ms42p-postmerkos-test.bin" "$TMP/ms42p-postmerkos-test.bin.manifest.json" <<'PY_PUBLISHED_MANIFEST'
+ import hashlib, json, os, sys
+ image, manifest_path = sys.argv[1:]

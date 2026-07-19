@@ -134,3 +134,65 @@ grep -Fq 'REACHED-PREFLIGHT operation=preflight type=preflight scope=full contro
     <<<"$preflight_cli_output"
 
 echo 'PASS: firmware-flasher direct preflight does not require a firmware image'
+
+# PMOSLIVE must be visible as both interactive operations and explicit CLI modes.
+for entry in '6 liveboot-verify' '7 liveboot-dry-run' '8 liveboot'; do
+    read -r choice expected <<<"$entry"
+    actual=$(printf '%s\n' "$choice" | bash -Eeuo pipefail -c '
+        source "$1"
+        select_operation >/dev/null
+        printf "%s" "$OPERATION"
+    ' bash "$FLASHER")
+    [[ $actual == "$expected" ]]
+done
+
+liveboot_cli_output=$(
+    bash -Eeuo pipefail -c '
+        source "$1"
+        need() { :; }
+        select_firmware() { SELECTED_FIRMWARE=/tmp/live.bin; SELECTED_TYPE=full; }
+        manifest_declares_liveboot() { return 0; }
+        run_liveboot_mode() {
+            printf "REACHED-LIVEBOOT operation=%s path=%s control=%s\n" \
+                "$OPERATION" "$LIVEBOOT_PATH" "$CONTROL_PATH"
+        }
+        main --liveboot-verify --liveboot-path embedded --target-model MS42P
+    ' bash "$FLASHER" 2>&1
+)
+grep -Fq 'REACHED-LIVEBOOT operation=liveboot-verify path=embedded control=liveboot' <<<"$liveboot_cli_output"
+
+# Interactive PMOSLIVE selection must also expose the entry-path prompt.
+interactive_liveboot_output=$(printf '7\n2\n' | bash -Eeuo pipefail -c '
+    source "$1"
+    need() { :; }
+    select_firmware() { SELECTED_FIRMWARE=/tmp/live.bin; SELECTED_TYPE=full; }
+    manifest_declares_liveboot() { return 0; }
+    run_liveboot_mode() {
+        printf "REACHED-INTERACTIVE-LIVEBOOT operation=%s path=%s control=%s\n" \
+            "$OPERATION" "$LIVEBOOT_PATH" "$CONTROL_PATH"
+    }
+    main
+' bash "$FLASHER" 2>&1)
+grep -Fq 'REACHED-INTERACTIVE-LIVEBOOT operation=liveboot-dry-run path=ram-upload control=liveboot' \
+    <<<"$interactive_liveboot_output"
+
+# A valid modern image without PMOSLIVE metadata must still reach normal flashing.
+nonlive_flash_output=$(
+    bash -Eeuo pipefail -c '
+        source "$1"
+        need() { :; }
+        select_firmware() { SELECTED_FIRMWARE=/tmp/nonlive.bin; SELECTED_TYPE=full; }
+        manifest_declares_liveboot() { return 1; }
+        select_operation() { OPERATION=verify; OPERATION_ARGS=(--verify-only); }
+        select_flash_scope() { FLASH_SCOPE=system; }
+        select_overlay_policy() { OVERLAY_POLICY=preserve; }
+        run_ssh_mode() { printf "REACHED-NONLIVE-FLASH operation=%s scope=%s\n" "$OPERATION" "$FLASH_SCOPE"; }
+        main --control ssh
+    ' bash "$FLASHER" 2>&1
+)
+grep -Fq 'REACHED-NONLIVE-FLASH operation=verify scope=system' <<<"$nonlive_flash_output"
+
+grep -Fq -- '--liveboot' < <("$FLASHER" --help)
+grep -Fq -- '--console-mode {firmware,liveboot}' < <(python3 "$(dirname "$FLASHER")/serial-runner.py" --help)
+
+echo 'PASS: firmware-flasher PMOSLIVE CLI exposure and non-live flashing gate'

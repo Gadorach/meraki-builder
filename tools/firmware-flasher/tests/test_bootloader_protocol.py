@@ -538,6 +538,30 @@ class ProtocolTests(unittest.TestCase):
         self._exercise_embedded_bootlog("luton26", 1)
 
 
+    def test_uploaded_recovery_accepts_legacy_two_option_menu(self) -> None:
+        link = mock.Mock()
+        link.wait_for.side_effect = [
+            "PMOSBOOT MENU-PROBE TIMEOUT_MS=00000bb8",
+            "PMOSBOOT PASS-MENU-TRIGGER: BYTE: 0x0000000D",
+            "PMOSBOOT MENU 1=UART-RAMLOADER 2=FW-RECOVERY",
+            "PMOSBOOT MENU-READY TIMEOUT_MS=00001388",
+            "PMOSBOOT PASS-MENU-CHOICE: SELECTED: 0x00000001",
+            "PMOSRAM READY 2 SOC=jaguar1",
+            "PMOSREC READY 3 SOC=jaguar1 FAMILY=00000002",
+            "PMOSREC DESCRIPTOR PMOSRECOVERY3;SOC=jaguar1;FAMILY=2;SPI=70000068;PROTO=3;PREFLIGHT=4;BAUDTEST=1;FRAME_MAX=4096;WINDOW_MAX=16;ACKFMT=BIN1;SPARSE=1;LZ4=1;CONFIRM_RETRY=1;AUTO_CONFIRM=1;AUTO_REBOOT=1;END",
+            "PMOSREC UART-CAP CLOCK=103219200 DIV_MIN=1 DIV_MAX=65535 CURRENT=115200",
+            "PMOSREC FLASH-PREFLIGHT-OK ID=c22018 ERASE=00010000 PAGE=00000100",
+            "PMOSREC COMMAND-READY 3",
+        ]
+        with mock.patch.object(br, "send_ram_payload") as send_payload:
+            selected = br.enter_recovery(
+                link, "ram-upload", "jaguar1", 30.0, b"payload",
+                0x86C00000, 0x86C00000, 1024, 3, 5.0,
+            )
+        self.assertEqual(selected, "ram-upload")
+        self.assertEqual(link.write_all.call_args_list[:2], [mock.call(b"\r"), mock.call(b"1")])
+        send_payload.assert_called_once()
+
     def test_uploaded_recovery_waits_for_descriptor_before_package_transfer(self) -> None:
         link = mock.Mock()
         link.wait_for.side_effect = [
@@ -694,6 +718,24 @@ class ProtocolTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("without opening the serial port", result.stdout)
+
+    def test_non_live_bundle_is_flashable_but_not_liveboot_capable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            bundle = BundleFixture(Path(temp))
+            manifest = json.loads(bundle.manifest.read_text())
+            manifest["recovery"].pop("uart_liveboot", None)
+            loader = manifest["recovery"]["uart_ramloader"]
+            loader["boot_menu"]["options"].pop("3", None)
+            loader.pop("embedded_liveboot", None)
+            bundle.manifest.write_text(json.dumps(manifest) + "\n")
+
+            info = bp.validate_bundle(bundle.image, bundle.manifest, "MS42P", force=False)
+            self.assertEqual(info.family, "jaguar1")
+            with self.assertRaisesRegex(bp.ProtocolError, "PMOSLIVE|liveboot|menu option 3"):
+                bp.validate_bundle(
+                    bundle.image, bundle.manifest, "MS42P", force=False,
+                    require_liveboot=True,
+                )
 
     def test_liveboot_verify_validates_payload_without_opening_serial(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

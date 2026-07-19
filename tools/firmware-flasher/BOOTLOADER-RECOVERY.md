@@ -76,43 +76,41 @@ UART-enabled boot regions store one shared stage-1 blob at flash offset
 `0x20000`; the active and fallback LinuxLoader bodies remain separate and both
 copy the same validated stage into uncached RAM at `0xa7f00000`.
 
-Host-side validation does not open the serial port:
+The preferred interface is the main firmware flasher. Host-side validation does
+not open the serial port:
 
 ```sh
-python3 tools/firmware-flasher/bootloader-liveboot.py \
-  --operation verify \
+./tools/firmware-flasher/firmware-flasher.sh \
   --firmware artifacts/<full-image>.bin \
-  --manifest artifacts/<full-image>.manifest.json \
-  --target-model MS42P \
-  --payload artifacts/liveboot/pmoslive-jaguar1.bin
+  --liveboot-verify \
+  --target-model MS42P
 ```
 
 Exercise the complete transfer and target parsing path without jumping to
 Linux:
 
 ```sh
-python3 tools/firmware-flasher/bootloader-liveboot.py \
-  --operation dry-run \
-  --port /dev/serial/by-id/<adapter> \
-  --liveboot-path auto \
-  --payload artifacts/liveboot/pmoslive-jaguar1.bin \
+./tools/firmware-flasher/firmware-flasher.sh \
   --firmware artifacts/<full-image>.bin \
-  --manifest artifacts/<full-image>.manifest.json \
-  --target-model MS42P
+  --liveboot-dry-run \
+  --liveboot-path auto \
+  --target-model MS42P \
+  --serial-device /dev/serial/by-id/<adapter>
 ```
 
 Boot from RAM:
 
 ```sh
-python3 tools/firmware-flasher/bootloader-liveboot.py \
-  --operation boot \
-  --port /dev/serial/by-id/<adapter> \
-  --liveboot-path auto \
-  --payload artifacts/liveboot/pmoslive-jaguar1.bin \
+./tools/firmware-flasher/firmware-flasher.sh \
   --firmware artifacts/<full-image>.bin \
-  --manifest artifacts/<full-image>.manifest.json \
-  --target-model MS42P
+  --liveboot \
+  --liveboot-path auto \
+  --target-model MS42P \
+  --serial-device /dev/serial/by-id/<adapter>
 ```
+
+The lower-level `bootloader-liveboot.py` remains available for protocol
+development, but normal operator testing should use `firmware-flasher.sh`.
 
 `auto` first tries the embedded menu-3 payload and, after a requested power
 cycle, can fall back to uploading the supplied PMOSLIVE payload through menu

@@ -200,7 +200,7 @@ def inspect_payload(path: Path, descriptor_path: Path | None = None) -> PayloadD
     )
 
 
-def _validate_loader_capability(manifest: dict, loader_sha256: str, family: str) -> None:
+def _validate_loader_capability(manifest: dict, loader_sha256: str, family: str, *, require_liveboot: bool = False) -> None:
     recovery = manifest.get("recovery")
     if not isinstance(recovery, dict):
         raise ProtocolError("manifest does not contain a recovery capability record")
@@ -217,13 +217,11 @@ def _validate_loader_capability(manifest: dict, loader_sha256: str, family: str)
     if loader.get("build_manifest_format") != "postmerkos.vcoreiii-linuxloader-build.v7":
         raise ProtocolError("firmware loader is not a meraki-redboot v0.7 source build")
     menu = loader.get("boot_menu")
-    expected_options = {
-        "1": "uart-ramloader",
-        "2": "embedded-firmware-recovery",
-        "3": "embedded-liveboot",
-    }
-    if not isinstance(menu, dict) or menu.get("options") != expected_options:
+    options = menu.get("options") if isinstance(menu, dict) else None
+    if not isinstance(options, dict) or options.get("1") != "uart-ramloader" or options.get("2") != "embedded-firmware-recovery":
         raise ProtocolError("firmware loader does not expose the meraki-redboot recovery menu")
+    if require_liveboot and options.get("3") != "embedded-liveboot":
+        raise ProtocolError("firmware loader does not expose embedded PMOSLIVE menu option 3")
     if loader.get("image_check_diagnostics") != "structured-pass-warn-fail-skip-values-v1":
         raise ProtocolError("firmware loader does not declare structured image diagnostics")
     if loader.get("stage1_flash_offset") != 0x00020000 or loader.get("stage1_storage_contract") != "single-shared-boot-region-blob-v1":
@@ -254,36 +252,37 @@ def _validate_loader_capability(manifest: dict, loader_sha256: str, family: str)
         raise ProtocolError(
             "firmware image contains a recovery payload without the SPI master-enable handoff correction"
         )
-    live = loader.get("embedded_liveboot")
-    live_record = live.get("jaguar1") if isinstance(live, dict) else None
-    if not isinstance(live_record, dict):
-        raise ProtocolError("firmware loader does not bind an embedded Jaguar1 PMOSLIVE payload")
-    if not re.fullmatch(r"[0-9a-fA-F]{64}", str(live_record.get("sha256", ""))):
-        raise ProtocolError("firmware loader PMOSLIVE binding has an invalid SHA-256")
-    if live_record.get("load_address") != 0x86C00000 or live_record.get("entry_address") != 0x86C00000:
-        raise ProtocolError("firmware loader PMOSLIVE payload is not linked at 0x86c00000")
-    if live_record.get("entry_contract") != "flat-binary-byte-zero-v1":
-        raise ProtocolError("firmware loader PMOSLIVE payload lacks the byte-zero entry contract")
-    if live_record.get("flash_access") != "none":
-        raise ProtocolError("firmware loader PMOSLIVE payload is not declared flash-write-free")
-    if live_record.get("accepted_models") != ["MS42", "MS42P"]:
-        raise ProtocolError("firmware loader PMOSLIVE target allow-list is incompatible")
-    if live_record.get("transport_contract") != "pmosrec-v3-adaptive-uart-sparse-lz4-v1":
-        raise ProtocolError("firmware loader PMOSLIVE transport contract is incompatible")
-    if live_record.get("linux_handoff") != "mips-legacy-argc-argv-envp-external-initrd-v1":
-        raise ProtocolError("firmware loader PMOSLIVE Linux handoff contract is incompatible")
-    if live_record.get("rootfs_handoff") != "squashfs-as-legacy-initrd-v1":
-        raise ProtocolError("firmware loader PMOSLIVE rootfs handoff contract is incompatible")
-    if live_record.get("kernel_load_address") != 0x81000000 or live_record.get("squashfs_address") != 0x87000000:
-        raise ProtocolError("firmware loader PMOSLIVE RAM layout is incompatible")
-    if (
-        live_record.get("boot_params_physical_address") != 0x00000400
-        or live_record.get("boot_params_uncached_address") != 0xA0000400
-        or live_record.get("boot_params_bytes") != 0x00000C00
-    ):
-        raise ProtocolError("firmware loader PMOSLIVE boot-parameter workspace is incompatible")
-    if live_record.get("linux_memory_mib") != 120 or live_record.get("top_reserved_mib") != 8:
-        raise ProtocolError("firmware loader PMOSLIVE memory reservation is incompatible")
+    if require_liveboot:
+        live = loader.get("embedded_liveboot")
+        live_record = live.get("jaguar1") if isinstance(live, dict) else None
+        if not isinstance(live_record, dict):
+            raise ProtocolError("firmware loader does not bind an embedded Jaguar1 PMOSLIVE payload")
+        if not re.fullmatch(r"[0-9a-fA-F]{64}", str(live_record.get("sha256", ""))):
+            raise ProtocolError("firmware loader PMOSLIVE binding has an invalid SHA-256")
+        if live_record.get("load_address") != 0x86C00000 or live_record.get("entry_address") != 0x86C00000:
+            raise ProtocolError("firmware loader PMOSLIVE payload is not linked at 0x86c00000")
+        if live_record.get("entry_contract") != "flat-binary-byte-zero-v1":
+            raise ProtocolError("firmware loader PMOSLIVE payload lacks the byte-zero entry contract")
+        if live_record.get("flash_access") != "none":
+            raise ProtocolError("firmware loader PMOSLIVE payload is not declared flash-write-free")
+        if live_record.get("accepted_models") != ["MS42", "MS42P"]:
+            raise ProtocolError("firmware loader PMOSLIVE target allow-list is incompatible")
+        if live_record.get("transport_contract") != "pmosrec-v3-adaptive-uart-sparse-lz4-v1":
+            raise ProtocolError("firmware loader PMOSLIVE transport contract is incompatible")
+        if live_record.get("linux_handoff") != "mips-legacy-argc-argv-envp-external-initrd-v1":
+            raise ProtocolError("firmware loader PMOSLIVE Linux handoff contract is incompatible")
+        if live_record.get("rootfs_handoff") != "squashfs-as-legacy-initrd-v1":
+            raise ProtocolError("firmware loader PMOSLIVE rootfs handoff contract is incompatible")
+        if live_record.get("kernel_load_address") != 0x81000000 or live_record.get("squashfs_address") != 0x87000000:
+            raise ProtocolError("firmware loader PMOSLIVE RAM layout is incompatible")
+        if (
+            live_record.get("boot_params_physical_address") != 0x00000400
+            or live_record.get("boot_params_uncached_address") != 0xA0000400
+            or live_record.get("boot_params_bytes") != 0x00000C00
+        ):
+            raise ProtocolError("firmware loader PMOSLIVE boot-parameter workspace is incompatible")
+        if live_record.get("linux_memory_mib") != 120 or live_record.get("top_reserved_mib") != 8:
+            raise ProtocolError("firmware loader PMOSLIVE memory reservation is incompatible")
 
 
 def validate_spim_kernel(image: Path, artifact: dict | None = None) -> dict[str, int | str]:
@@ -560,7 +559,7 @@ def validate_recovery_payload(path: Path, descriptor: PayloadDescriptor, bundle:
         raise ProtocolError("recovery payload adaptive transport contract does not match the release manifest")
 
 
-def validate_bundle(image: Path, manifest_path: Path, model: str, *, force: bool) -> BundleInfo:
+def validate_bundle(image: Path, manifest_path: Path, model: str, *, force: bool, require_liveboot: bool = False) -> BundleInfo:
     if model not in MODEL_FAMILY:
         raise ProtocolError(f"unsupported exact target model: {model}")
     if not image.is_file() or image.stat().st_size != FULL_IMAGE_SIZE:
@@ -596,11 +595,23 @@ def validate_bundle(image: Path, manifest_path: Path, model: str, *, force: bool
         raise ProtocolError(f"{model} is untested in this artifact; force operation is required")
     with image.open("rb") as stream:
         loader = stream.read(LOADER_REGION_SIZE)
-    _validate_loader_capability(manifest, hashlib.sha256(loader).hexdigest(), MODEL_FAMILY[model])
+    _validate_loader_capability(
+        manifest, hashlib.sha256(loader).hexdigest(), MODEL_FAMILY[model],
+        require_liveboot=require_liveboot,
+    )
     _recovery_payload_record(manifest, MODEL_FAMILY[model], model)
-    if model in {"MS42", "MS42P"}:
+    if require_liveboot:
+        if model not in {"MS42", "MS42P"}:
+            raise ProtocolError("PMOSLIVE currently supports Jaguar1 MS42/MS42P only")
         _liveboot_payload_record(manifest, model)
-    for marker in (b"PMOSRAM READY 2", b"PMOSBOOT MENU-PROBE", b"PMOSBOOT MENU 1=UART-RAMLOADER 2=FW-RECOVERY 3=LIVEBOOT"):
+    markers = [
+        b"PMOSRAM READY 2",
+        b"PMOSBOOT MENU-PROBE",
+        b"PMOSBOOT MENU 1=UART-RAMLOADER 2=FW-RECOVERY",
+    ]
+    if require_liveboot:
+        markers.append(b"PMOSBOOT MENU 1=UART-RAMLOADER 2=FW-RECOVERY 3=LIVEBOOT")
+    for marker in markers:
         if marker not in loader:
             raise ProtocolError(f"image bootloader region is missing meraki-redboot capability marker {marker!r}")
     validate_spim_kernel(image, artifact)
@@ -617,6 +628,25 @@ def validate_bundle(image: Path, manifest_path: Path, model: str, *, force: bool
         manifest_bytes=manifest_bytes,
         model_status=status,
     )
+
+
+BOOT_MENU_PREFIX = "PMOSBOOT MENU 1=UART-RAMLOADER 2=FW-RECOVERY"
+
+
+def parse_boot_menu(line: str) -> frozenset[int]:
+    """Return menu options advertised by old or current meraki-redboot.
+
+    RedBoot releases before PMOSLIVE advertise only options 1 and 2.  Newer
+    releases append ``3=LIVEBOOT`` to the same stable prefix.  Treat the
+    two-option line as a valid legacy menu so menu option 1 can upload a
+    current PMOSLIVE or PMOSREC payload.
+    """
+    if not line.startswith(BOOT_MENU_PREFIX):
+        raise ProtocolError(f"unrecognized meraki-redboot menu: {line}")
+    options = {1, 2}
+    if "3=LIVEBOOT" in line:
+        options.add(3)
+    return frozenset(options)
 
 
 class SerialLink:

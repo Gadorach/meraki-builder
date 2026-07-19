@@ -39,3 +39,12 @@
 ?? scripts/tests/test-liveboot-kernel-config.py
 ?? tools/firmware-flasher/PMOSLIVE.md
 ?? tools/firmware-flasher/bootloader-liveboot.py
+ M tools/firmware-flasher/README.md
+ M tools/firmware-flasher/PMOSLIVE.md
+ M tools/firmware-flasher/bootloader-liveboot.py
+ M tools/firmware-flasher/firmware-flasher.sh
+ M tools/firmware-flasher/serial-runner.py
+ M tools/firmware-flasher/tests/test_flasher_control_flow.sh
+?? tools/firmware-flasher/tests/test_liveboot_console.py
+?? docs/development/pmoslive-firmware-flasher-integration-2026-07-19.md
+?? PMOSLIVE-FLASHER-INTEGRATION.patch

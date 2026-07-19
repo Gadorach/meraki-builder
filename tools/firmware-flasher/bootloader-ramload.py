@@ -12,11 +12,13 @@ import sys
 import termios
 
 from bootloader_protocol import (
+    BOOT_MENU_PREFIX,
     ProtocolError,
     EmbeddedRecoveryEntryError,
     SerialLink,
     inspect_payload,
     MODEL_FAMILY,
+    parse_boot_menu,
     send_ram_payload,
     validate_bundle,
     validate_recovery_payload,
@@ -159,9 +161,12 @@ def enter_recovery(
             error_prefixes=("PMOSBOOT WARN-MENU-TIMEOUT",),
         )
         require_hex_field(trigger, MENU_BYTE, 0x0D, "menu trigger")
-        link.wait_for(("PMOSBOOT MENU 1=UART-RAMLOADER 2=FW-RECOVERY 3=LIVEBOOT",), 4.0)
+        menu_line = link.wait_for((BOOT_MENU_PREFIX,), 4.0)
+        menu_options = parse_boot_menu(menu_line)
         link.wait_for(("PMOSBOOT MENU-READY",), 4.0)
         choice = b"1" if path == "ram-upload" else b"2"
+        if int(choice) not in menu_options:
+            raise ProtocolError(f"installed meraki-redboot menu does not advertise option {choice.decode()}")
         link.write_all(choice)
         selected = link.wait_for(("PMOSBOOT PASS-MENU-CHOICE",), 4.0)
         require_hex_field(selected, MENU_SELECTION, int(choice), "menu selection")

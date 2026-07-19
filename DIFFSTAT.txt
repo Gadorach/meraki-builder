@@ -40,3 +40,10 @@
  tools/firmware-flasher/tests/test_pmosrec_v3.py    |  25 ++
  tools/fwupdate-smoke-test/host-smoke-test.sh       |   2 +-
  41 files changed, 2112 insertions(+), 109 deletions(-)
+
+PMOSLIVE firmware-flasher integration delta from buildfix1:
+  - main interactive and noninteractive live-boot operations
+  - live-only capability gating; ordinary non-live flashing preserved
+  - PMOSLIVE serial-console state-machine dispatch
+  - serial/menu/handoff regression tests
+  - synchronized current liveboot smoke-test fixture

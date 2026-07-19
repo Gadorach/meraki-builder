@@ -1,7 +1,8 @@
 # Firmware flasher
 
-`firmware-flasher.sh` validates a selected artifact and starts either the normal
-Linux updater or meraki-redboot pre-kernel UART recovery.
+`firmware-flasher.sh` validates a selected artifact and starts the normal Linux
+updater, meraki-redboot pre-kernel UART recovery, or non-destructive PMOSLIVE RAM
+boot. The interactive operation menu exposes all three workflows.
 
 ## Artifact contracts
 
@@ -18,7 +19,52 @@ available with `--control serial --transport uart`. System scope updates the
 normal system regions; full scope requires an exact 16 MiB image and the
 independent full-flash acknowledgements.
 
-## Pre-kernel mode
+## PMOSLIVE RAM boot
+
+The main flasher performs local capability checks, target-side validation-only
+runs, and complete RAM boots:
+
+```sh
+# Local image/loader/kernel/rootfs/payload validation; no serial access.
+./tools/firmware-flasher/firmware-flasher.sh \
+  --firmware artifacts/<full-image>.bin \
+  --liveboot-verify \
+  --target-model MS42P
+
+# Transfer and parse everything on the target, but do not enter Linux.
+./tools/firmware-flasher/firmware-flasher.sh \
+  --firmware artifacts/<full-image>.bin \
+  --liveboot-dry-run \
+  --liveboot-path ram-upload \
+  --target-model MS42P \
+  --serial-device /dev/serial/by-id/<adapter>
+
+# Use installed menu option 3 and boot Linux entirely from RAM.
+./tools/firmware-flasher/firmware-flasher.sh \
+  --firmware artifacts/<full-image>.bin \
+  --liveboot \
+  --liveboot-path embedded \
+  --target-model MS42P \
+  --serial-device /dev/serial/by-id/<adapter>
+```
+
+`--liveboot-path` accepts `embedded`, `ram-upload`, or `auto`. RAM upload uses
+`artifacts/liveboot/pmoslive-jaguar1.bin` by default; override it with
+`--liveboot-payload` and `--liveboot-descriptor`. The RAM-upload path accepts
+both the legacy two-option RedBoot menu and the newer three-option menu. In
+`auto` mode, a legacy menu is detected in place and option 1 is selected
+without requiring another reset; option 3 is used only when it is advertised.
+
+Live capability is a separate, stricter contract. Images without
+`recovery.uart_liveboot` metadata remain eligible for ordinary SSH, serial, and
+bootloader recovery flashing; only a requested PMOSLIVE operation rejects them.
+The serial runner understands menu option 3, menu-option-1 payload upload,
+PMOSREC v3 image transfer, `BOOTRAM <nonce>`, UART restoration to 115200, and
+the first Linux banner.
+
+See [`PMOSLIVE.md`](PMOSLIVE.md) for the RAM map and safety boundary.
+
+## Pre-kernel firmware recovery
 
 ```sh
 ./tools/firmware-flasher/firmware-flasher.sh \
@@ -60,6 +106,14 @@ NOR behavior without transferring a firmware image. Detailed behavior is in
 ./tools/firmware-flasher/firmware-flasher.sh --bootloader-recovery --target-model MS220-8P
 ./tools/firmware-flasher/firmware-flasher.sh --bootloader-recovery --recovery-path ram-upload \
   --recovery-payload artifacts/recovery/recovery-jaguar1.bin --target-model MS42P
+./tools/firmware-flasher/firmware-flasher.sh --liveboot-verify \
+  --firmware artifacts/<full-image>.bin --target-model MS42P
+./tools/firmware-flasher/firmware-flasher.sh --liveboot-dry-run \
+  --firmware artifacts/<full-image>.bin --liveboot-path ram-upload \
+  --target-model MS42P --serial-device /dev/serial/by-id/<adapter>
+./tools/firmware-flasher/firmware-flasher.sh --liveboot \
+  --firmware artifacts/<full-image>.bin --liveboot-path embedded \
+  --target-model MS42P --serial-device /dev/serial/by-id/<adapter>
 ./tools/firmware-flasher/firmware-flasher.sh --self-test
 ```
 

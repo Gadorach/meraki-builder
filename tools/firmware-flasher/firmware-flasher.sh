@@ -24,6 +24,10 @@ TRANSPORT=tftp
 BOOTLOADER_RECOVERY=0
 BOOTLOADER_PAYLOAD=${BOOTLOADER_PAYLOAD:-}
 BOOTLOADER_RECOVERY_PATH=${BOOTLOADER_RECOVERY_PATH:-ram-upload}
+LIVEBOOT=0
+LIVEBOOT_PATH=${LIVEBOOT_PATH:-embedded}
+LIVEBOOT_PAYLOAD=${LIVEBOOT_PAYLOAD:-}
+LIVEBOOT_PAYLOAD_DESCRIPTOR=${LIVEBOOT_PAYLOAD_DESCRIPTOR:-}
 SERIAL_DEVICE=${SERIAL_DEVICE:-}
 TARGET_MODEL=${TARGET_MODEL:-}
 FORCE_FLASH=0
@@ -52,13 +56,20 @@ Options:
   --artifacts DIR       artifact directory (default: ../../artifacts)
   --firmware FILE       preselect an artifact instead of opening the list
   --tftp-port PORT      unprivileged TFTP port (default: 1069)
-  --control METHOD      ssh, serial, or bootloader; otherwise prompt
-  --transport METHOD    tftp (default) or uart; UART supports serial or bootloader control
+  --control METHOD      ssh, serial, bootloader, or liveboot; otherwise prompt
+  --transport METHOD    tftp (default) or uart; UART supports serial, bootloader, or liveboot
   --bootloader-recovery use meraki-redboot pre-kernel UART recovery
   --bootloader-preflight run UART/SPI/NOR erase-program-readback-restore test
+  --liveboot            transfer and boot a live-capable 16 MiB image entirely from RAM
+  --liveboot-dry-run    transfer and validate a live-capable image without entering Linux
+  --liveboot-verify     verify live-boot capability locally without opening serial
+  --liveboot-path PATH  embedded (default), ram-upload, or auto
+  --liveboot-payload FILE  standalone PMOSLIVE payload for ram-upload/auto
+  --liveboot-descriptor FILE  descriptor for --liveboot-payload
+  --liveboot-force      permit an image marked untested for the exact target model
   --recovery-path PATH ram-upload (default), embedded, or auto
   --recovery-payload FILE external payload for ram-upload/legacy fallback
-  --target-model MODEL  exact hardware model required for bootloader recovery
+  --target-model MODEL  exact hardware model for recovery or live boot
   --preflight-scratch N  aligned 64 KiB NOR address (default: 0x00ff0000)
   --manual-target-confirmation  require manual ERASEFLASH challenge entry
   --verbose-acks        print every decoded compact ACK (always retained in logs)
@@ -86,6 +97,10 @@ Checksum-only artifact set:
   image.bin.sha256
 
 Full flash accepts only an exact 16 MiB image and is unavailable in legacy mode.
+
+Live boot requires a modern 16 MiB image whose manifest declares recovery.uart_liveboot,
+a compatible built-in RAM-disk/SquashFS kernel, and a flash-disabled PMOSLIVE payload.
+Images without live capability remain valid for ordinary SSH/serial/bootloader flashing.
 
 Bootloader recovery requires a source-built meraki-redboot with PMOSRAM protocol v2.
 The host verifies the exact model, SoC-specific recovery payload, release manifest,
@@ -288,6 +303,76 @@ if any(not isinstance(key, str) or value not in allowed for key, value in models
 PY
 }
 
+
+manifest_declares_liveboot() {
+    local image=$1 manifest="$1.manifest.json"
+    [[ -f $manifest ]] || return 1
+    python3 - "$manifest" <<'PY_LIVE_CAP'
+import json
+import sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        manifest = json.load(stream)
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(1)
+recovery = manifest.get("recovery")
+live = recovery.get("uart_liveboot") if isinstance(recovery, dict) else None
+if not isinstance(live, dict) or live.get("enabled") is not True:
+    raise SystemExit(1)
+if live.get("flash_access") != "none":
+    raise SystemExit(1)
+if live.get("operations") != ["verify", "dry-run", "liveboot"]:
+    raise SystemExit(1)
+payloads = live.get("payloads")
+record = payloads.get("jaguar1") if isinstance(payloads, dict) else None
+if not isinstance(record, dict) or record.get("accepted_models") != ["MS42", "MS42P"]:
+    raise SystemExit(1)
+if record.get("linux_handoff") != "mips-legacy-argc-argv-envp-external-initrd-v1":
+    raise SystemExit(1)
+if record.get("rootfs_handoff") != "squashfs-as-legacy-initrd-v1":
+    raise SystemExit(1)
+PY_LIVE_CAP
+}
+
+report_liveboot_capability() {
+    if [[ $MODE == modern && $SELECTED_TYPE == full ]] && manifest_declares_liveboot "$SELECTED_FIRMWARE"; then
+        log 'selected image declares PMOSLIVE capability; strict target/image validation is available'
+    else
+        log 'selected image does not declare PMOSLIVE capability; ordinary flashing remains available'
+    fi
+}
+
+is_liveboot_operation() {
+    [[ $OPERATION == liveboot-verify || $OPERATION == liveboot-dry-run || $OPERATION == liveboot ]]
+}
+
+activate_liveboot() {
+    [[ $MODE == modern ]] || die 'live boot requires the modern manifest-aware artifact contract'
+    [[ $SELECTED_TYPE == full ]] || die 'live boot requires a supported 16 MiB SPIM/SquashFS full image'
+    manifest_declares_liveboot "$SELECTED_FIRMWARE" || \
+        die 'the selected image does not declare compatible PMOSLIVE capability; it may still be flashed normally'
+    LIVEBOOT=1
+    CONTROL_PATH=liveboot
+    TRANSPORT=uart
+}
+
+select_liveboot_path() {
+    local choice
+    printf '\nLive-boot entry path:\n'
+    printf '  1) Embedded PMOSLIVE (menu option 3; default)\n'
+    printf '  2) Upload PMOSLIVE through RAM loader (menu option 1)\n'
+    printf '  3) Try embedded, then fall back to RAM upload after a reset\n'
+    while :; do
+        read -r -p 'Select live-boot path [1]: ' choice
+        case ${choice:-1} in
+            1) LIVEBOOT_PATH=embedded; return ;;
+            2) LIVEBOOT_PATH=ram-upload; return ;;
+            3) LIVEBOOT_PATH=auto; return ;;
+            *) warn 'invalid selection' ;;
+        esac
+    done
+}
+
 expected_rootfs_hash() {
     if [[ $2 == full ]]; then
         dd if="$1" bs=1048576 skip=3 count=8 status=none | sha256sum | awk '{print $1}'
@@ -333,6 +418,7 @@ select_firmware() {
                     die 'legacy updater mode cannot install an unknown full-flash layout'
                 ;;
         esac
+        report_liveboot_capability
         return
     fi
 
@@ -358,8 +444,18 @@ select_firmware() {
 
     printf '\nAvailable %s firmware artifacts:\n' "$MODE"
     for i in "${!files[@]}"; do
-        case $MODE in modern) status=manifest ;; checksum) status=checksum ;; legacy) status=legacy ;; esac
-        printf '  %d) %-9s %-10s %-8s %s\n' "$((i + 1))" "${types[$i]}" \
+        case $MODE in
+            modern)
+                if [[ ${types[$i]} == full ]] && manifest_declares_liveboot "${files[$i]}"; then
+                    status=manifest+live
+                else
+                    status=manifest
+                fi
+                ;;
+            checksum) status=checksum ;;
+            legacy) status=legacy ;;
+        esac
+        printf '  %d) %-9s %-10s %-13s %s\n' "$((i + 1))" "${types[$i]}" \
             "$(human_size "${sizes[$i]}")" "$status" "$(basename -- "${files[$i]}")"
     done
     while :; do
@@ -370,6 +466,7 @@ select_firmware() {
         }
         SELECTED_FIRMWARE=${files[$((choice - 1))]}
         SELECTED_TYPE=${types[$((choice - 1))]}
+        report_liveboot_capability
         return
     done
 }
@@ -513,12 +610,25 @@ select_control_path() {
 select_operation() {
     local choice
     (( OPERATION_PRESELECTED == 0 )) || return 0
-    printf '\nOperation:\n'
-    printf '  1) Verify download, checksum, manifest/metadata, board, and layout\n'
-    printf '  2) Dry run; stage and prepare without stopping services or writing flash\n'
-    printf '  3) Flash firmware and reboot\n'
-    printf '  4) Force flash/reinstall/downgrade and reboot\n'
-    printf '  5) Preflight pre-boot UART + SPI NOR read/erase/program/readback/restore\n'
+    printf '
+Operation:
+'
+    printf '  1) Verify download, checksum, manifest/metadata, board, and layout
+'
+    printf '  2) Dry run; stage and prepare without stopping services or writing flash
+'
+    printf '  3) Flash firmware and reboot
+'
+    printf '  4) Force flash/reinstall/downgrade and reboot
+'
+    printf '  5) Preflight pre-boot UART + SPI NOR read/erase/program/readback/restore
+'
+    printf '  6) Verify PMOSLIVE capability locally (no serial connection)
+'
+    printf '  7) PMOSLIVE dry run; transfer and validate without entering Linux
+'
+    printf '  8) Live boot the selected image entirely from RAM (no flash writes)
+'
     while :; do
         read -r -p 'Select operation [1]: ' choice
         case ${choice:-1} in
@@ -527,6 +637,9 @@ select_operation() {
             3) OPERATION=flash; OPERATION_ARGS=(); return ;;
             4) OPERATION=flash; OPERATION_ARGS=(--force); FORCE_FLASH=1; return ;;
             5) OPERATION=preflight; OPERATION_ARGS=(); BOOTLOADER_RECOVERY=1; CONTROL_PATH=bootloader; return ;;
+            6) OPERATION=liveboot-verify; OPERATION_ARGS=(); LIVEBOOT=1; CONTROL_PATH=liveboot; return ;;
+            7) OPERATION=liveboot-dry-run; OPERATION_ARGS=(); LIVEBOOT=1; CONTROL_PATH=liveboot; return ;;
+            8) OPERATION=liveboot; OPERATION_ARGS=(); LIVEBOOT=1; CONTROL_PATH=liveboot; return ;;
             *) warn 'invalid selection' ;;
         esac
     done
@@ -1013,6 +1126,93 @@ run_serial_mode() {
     log "serial-controlled $OPERATION completed"
 }
 
+
+run_liveboot_mode() {
+    local default_payload payload_descriptor live_operation args=() log_file rc
+    need python3
+    [[ -x $SCRIPT_DIR/serial-runner.py ]] || die 'serial-runner.py helper is missing or not executable'
+    [[ -x $SCRIPT_DIR/bootloader-liveboot.py ]] || die 'bootloader-liveboot.py helper is missing or not executable'
+    [[ -f $SCRIPT_DIR/bootloader_protocol.py && -f $SCRIPT_DIR/pmosrec_v3.py ]] || \
+        die 'PMOSLIVE protocol helpers are missing'
+    activate_liveboot
+    [[ -n $TARGET_MODEL ]] || TARGET_MODEL=$(prompt_default 'Exact live-boot target model' 'MS42P')
+    case $TARGET_MODEL in
+        MS42|MS42P) ;;
+        *) die "PMOSLIVE currently supports MS42 and MS42P only: $TARGET_MODEL" ;;
+    esac
+    case $OPERATION in
+        liveboot-verify) live_operation=verify ;;
+        liveboot-dry-run) live_operation=dry-run ;;
+        liveboot) live_operation=boot ;;
+        *) die "invalid PMOSLIVE operation: $OPERATION" ;;
+    esac
+
+    default_payload="$ARTIFACTS_DIR/liveboot/pmoslive-jaguar1.bin"
+    if [[ $LIVEBOOT_PATH == ram-upload || $LIVEBOOT_PATH == auto || -n $LIVEBOOT_PAYLOAD ]]; then
+        [[ -n $LIVEBOOT_PAYLOAD ]] || LIVEBOOT_PAYLOAD=$default_payload
+        [[ -f $LIVEBOOT_PAYLOAD ]] || die "standalone PMOSLIVE payload not found: $LIVEBOOT_PAYLOAD"
+        payload_descriptor=$LIVEBOOT_PAYLOAD_DESCRIPTOR
+        [[ -n $payload_descriptor ]] || payload_descriptor="${LIVEBOOT_PAYLOAD%.bin}.descriptor.json"
+        [[ -f $payload_descriptor ]] || die "PMOSLIVE payload descriptor not found: $payload_descriptor"
+    fi
+
+    args=(
+        --console-mode liveboot
+        --operation "$live_operation"
+        --liveboot-path "$LIVEBOOT_PATH"
+        --firmware "$SELECTED_FIRMWARE"
+        --manifest "$SELECTED_FIRMWARE.manifest.json"
+        --target-model "$TARGET_MODEL"
+    )
+    if [[ -n $LIVEBOOT_PAYLOAD ]]; then
+        args+=(--payload "$LIVEBOOT_PAYLOAD" --payload-descriptor "$payload_descriptor")
+    fi
+    (( FORCE_FLASH )) && args+=(--force)
+    (( MANUAL_TARGET_CONFIRMATION )) && args+=(--manual-target-confirmation)
+    (( VERBOSE_ACKS )) && args+=(--verbose-acks)
+    (( SKIP_BAUD_NEGOTIATION )) && args+=(--skip-baud-negotiation)
+    (( DIAGNOSTIC_BAUD_SCAN )) && args+=(--diagnostic-baud-scan)
+    (( DIAGNOSTIC_WINDOW_SCAN )) && args+=(--diagnostic-window-scan)
+
+    printf '\nPre-kernel PMOSLIVE\n'
+    printf 'Operation:         %s\n' "$live_operation"
+    printf 'Target model:      %s (Jaguar1)\n' "$TARGET_MODEL"
+    printf 'Selected firmware: %s\n' "$SELECTED_FIRMWARE"
+    printf 'Live-boot path:    %s\n' "$LIVEBOOT_PATH"
+    printf 'Flash access:      none (PMOSLIVE contract)\n'
+    if [[ -n $LIVEBOOT_PAYLOAD ]]; then
+        printf 'External payload:  %s\n' "$LIVEBOOT_PAYLOAD"
+    else
+        printf 'External payload:  not required (embedded menu option 3)\n'
+    fi
+
+    if [[ $live_operation == verify ]]; then
+        python3 "$SCRIPT_DIR/serial-runner.py" "${args[@]}"
+        return
+    fi
+
+    select_serial_device
+    ensure_serial_access
+    args+=(--device "$SERIAL_DEVICE")
+    printf 'Serial device:     %s, 115200 8N1, PMOSREC v3 binary transport\n\n' "$SERIAL_DEVICE"
+    if [[ $live_operation == boot ]]; then
+        prompt_yes_no 'Begin non-destructive RAM live boot?' y || die 'cancelled'
+    else
+        prompt_yes_no 'Begin non-destructive PMOSLIVE transfer and validation dry run?' y || die 'cancelled'
+    fi
+    mkdir -p "$LOG_DIR"
+    log_file="$LOG_DIR/bootloader-liveboot-${TARGET_MODEL}-$(date +%Y%m%d-%H%M%S).log"
+    printf 'Live-boot log:     %s\n' "$log_file"
+    set +e
+    SUPPRESS_ERR_REPORT=1
+    python3 "$SCRIPT_DIR/serial-runner.py" "${args[@]}" 2>&1 | tee "$log_file"
+    rc=${PIPESTATUS[0]}
+    SUPPRESS_ERR_REPORT=0
+    set -e
+    (( rc == 0 )) || die "PMOSLIVE operation ended with status $rc; inspect $log_file"
+    log "PMOSLIVE $live_operation completed"
+}
+
 run_bootloader_recovery_mode() {
     local family default_payload preflight_receipt args=()
     need python3
@@ -1154,7 +1354,7 @@ PY
     printf UBT0 | dd of="$TMP/alternate-boot.bin" bs=1 seek=$((0x40000)) conv=notrunc status=none
     [[ $(classify_firmware "$TMP/alternate-boot.bin") == raw-full ]] || die 'alternate boot-chain classification self-test failed'
     if [[ ${FIRMWARE_FLASHER_SELFTEST_QUICK:-0} != 1 ]]; then
-        python3 - "$SCRIPT_DIR/tftp-server.py" "$SCRIPT_DIR/serial-runner.py" "$SCRIPT_DIR/bootloader-ramload.py" "$SCRIPT_DIR/bootloader_protocol.py" "$SCRIPT_DIR/pmosrec_v3.py" <<'PY_SYNTAX'
+        python3 - "$SCRIPT_DIR/tftp-server.py" "$SCRIPT_DIR/serial-runner.py" "$SCRIPT_DIR/bootloader-ramload.py" "$SCRIPT_DIR/bootloader-liveboot.py" "$SCRIPT_DIR/bootloader_protocol.py" "$SCRIPT_DIR/pmosrec_v3.py" <<'PY_SYNTAX'
 from pathlib import Path
 import sys
 for source in sys.argv[1:]:
@@ -1162,7 +1362,7 @@ for source in sys.argv[1:]:
 PY_SYNTAX
         python3 -m unittest discover -s "$SCRIPT_DIR/tests" -p 'test_*.py' -v
     fi
-    log 'TFTP, artifact bundles, image classification, and UART recovery protocol self-tests passed'
+    log 'TFTP, artifact bundles, live-boot capability, image classification, and UART protocol self-tests passed'
 }
 
 main() {
@@ -1172,10 +1372,17 @@ main() {
             --artifacts) (($# >= 2)) || die '--artifacts requires a directory'; ARTIFACTS_DIR=$2; shift 2 ;;
             --firmware) (($# >= 2)) || die '--firmware requires a file'; SELECTED_FIRMWARE=$2; shift 2 ;;
             --tftp-port) (($# >= 2)) || die '--tftp-port requires a port'; TFTP_PORT=$2; shift 2 ;;
-            --control) (($# >= 2)) || die '--control requires ssh or serial'; CONTROL_PATH=$2; shift 2 ;;
+            --control) (($# >= 2)) || die '--control requires ssh, serial, bootloader, or liveboot'; CONTROL_PATH=$2; shift 2 ;;
             --transport) (($# >= 2)) || die '--transport requires tftp or uart'; TRANSPORT=$2; shift 2 ;;
             --bootloader-recovery) BOOTLOADER_RECOVERY=1; CONTROL_PATH=bootloader; FLASH_SCOPE=full; FLASH_SCOPE_REQUESTED=1; shift ;;
             --bootloader-preflight) BOOTLOADER_RECOVERY=1; CONTROL_PATH=bootloader; FLASH_SCOPE=full; FLASH_SCOPE_REQUESTED=1; OPERATION=preflight; OPERATION_PRESELECTED=1; shift ;;
+            --liveboot) LIVEBOOT=1; CONTROL_PATH=liveboot; OPERATION=liveboot; OPERATION_PRESELECTED=1; shift ;;
+            --liveboot-dry-run) LIVEBOOT=1; CONTROL_PATH=liveboot; OPERATION=liveboot-dry-run; OPERATION_PRESELECTED=1; shift ;;
+            --liveboot-verify) LIVEBOOT=1; CONTROL_PATH=liveboot; OPERATION=liveboot-verify; OPERATION_PRESELECTED=1; shift ;;
+            --liveboot-path) (($# >= 2)) || die '--liveboot-path requires embedded, ram-upload, or auto'; LIVEBOOT_PATH=$2; shift 2 ;;
+            --liveboot-payload) (($# >= 2)) || die '--liveboot-payload requires a file'; LIVEBOOT_PAYLOAD=$2; shift 2 ;;
+            --liveboot-descriptor) (($# >= 2)) || die '--liveboot-descriptor requires a file'; LIVEBOOT_PAYLOAD_DESCRIPTOR=$2; shift 2 ;;
+            --liveboot-force) FORCE_FLASH=1; shift ;;
             --recovery-path) (($# >= 2)) || die '--recovery-path requires embedded, auto, or ram-upload'; BOOTLOADER_RECOVERY_PATH=$2; shift 2 ;;
             --recovery-payload) (($# >= 2)) || die '--recovery-payload requires a file'; BOOTLOADER_PAYLOAD=$2; shift 2 ;;
             --target-model) (($# >= 2)) || die '--target-model requires a model'; TARGET_MODEL=$2; shift 2 ;;
@@ -1197,26 +1404,29 @@ main() {
             *) die "unknown option: $1" ;;
         esac
     done
-    [[ $CONTROL_PATH == '' || $CONTROL_PATH == ssh || $CONTROL_PATH == serial || $CONTROL_PATH == bootloader ]] || die '--control must be ssh, serial, or bootloader'
+    [[ $CONTROL_PATH == '' || $CONTROL_PATH == ssh || $CONTROL_PATH == serial || $CONTROL_PATH == bootloader || $CONTROL_PATH == liveboot ]] || die '--control must be ssh, serial, bootloader, or liveboot'
     [[ $TRANSPORT == tftp || $TRANSPORT == uart ]] || die '--transport must be tftp or uart'
     [[ $MODE == modern || $MODE == checksum || $MODE == legacy ]] || die 'invalid firmware contract mode'
-    [[ $TRANSPORT != uart || -z $CONTROL_PATH || $CONTROL_PATH == serial || $CONTROL_PATH == bootloader ]] || die '--transport uart requires --control serial or bootloader'
+    [[ $TRANSPORT != uart || -z $CONTROL_PATH || $CONTROL_PATH == serial || $CONTROL_PATH == bootloader || $CONTROL_PATH == liveboot ]] || die '--transport uart requires --control serial, bootloader, or liveboot'
     [[ $TRANSPORT != uart || $MODE != legacy ]] || die '--transport uart is unavailable with --legacy'
     [[ $FLASH_SCOPE == system || $FLASH_SCOPE == full ]] || die 'invalid flash scope'
     [[ ${#FIRMWARE_VERSION} -le 127 && $FIRMWARE_VERSION != *$'\n'* && $FIRMWARE_VERSION != *$'\r'* ]] || die 'invalid version hint'
     [[ $MODE != legacy || $FLASH_SCOPE != full ]] || die '--full-flash is unavailable with --legacy'
     [[ $BOOTLOADER_RECOVERY -eq 0 || $MODE == modern ]] || die '--bootloader-recovery requires --modern'
     [[ $BOOTLOADER_RECOVERY_PATH == embedded || $BOOTLOADER_RECOVERY_PATH == auto || $BOOTLOADER_RECOVERY_PATH == ram-upload ]] || die '--recovery-path must be embedded, auto, or ram-upload'
+    [[ $LIVEBOOT_PATH == embedded || $LIVEBOOT_PATH == auto || $LIVEBOOT_PATH == ram-upload ]] || die '--liveboot-path must be embedded, auto, or ram-upload'
     [[ $PREFLIGHT_SCRATCH =~ ^(0[xX][0-9a-fA-F]+|[0-9]+)$ ]] || die '--preflight-scratch must be a numeric address'
     if [[ $CONTROL_PATH == bootloader ]]; then
         BOOTLOADER_RECOVERY=1
         FLASH_SCOPE=full
         FLASH_SCOPE_REQUESTED=1
+    elif [[ $CONTROL_PATH == liveboot ]]; then
+        LIVEBOOT=1
     fi
     [[ $TFTP_PORT =~ ^[0-9]+$ ]] && (( TFTP_PORT >= 1024 && TFTP_PORT <= 65535 )) || die 'TFTP port must be from 1024 through 65535'
 
     for command in bash python3 sha256sum dd awk stat od tr readlink truncate head tee; do need "$command"; done
-    [[ -x $SCRIPT_DIR/tftp-server.py && -x $SCRIPT_DIR/serial-runner.py ]] || die 'private flasher helpers are missing or not executable'
+    [[ -x $SCRIPT_DIR/tftp-server.py && -x $SCRIPT_DIR/serial-runner.py && -x $SCRIPT_DIR/bootloader-liveboot.py ]] || die 'private flasher helpers are missing or not executable'
     (( self_test_requested )) && { self_test; return; }
     for command in find ip sort; do need "$command"; done
 
@@ -1229,9 +1439,20 @@ main() {
         FLASH_SCOPE_REQUESTED=1
     else
         select_firmware
-        select_flash_scope
         prepare_version_hint
         select_operation
+        if is_liveboot_operation || (( LIVEBOOT )); then
+            activate_liveboot
+            (( OPERATION_PRESELECTED )) || select_liveboot_path
+        else
+            select_flash_scope
+        fi
+    fi
+
+    if (( LIVEBOOT )); then
+        is_liveboot_operation || die '--control liveboot requires --liveboot, --liveboot-dry-run, or --liveboot-verify'
+        run_liveboot_mode
+        return
     fi
 
     if (( BOOTLOADER_RECOVERY )); then

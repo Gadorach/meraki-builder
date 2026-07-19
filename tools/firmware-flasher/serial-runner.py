@@ -11,6 +11,7 @@ import argparse
 import base64
 import binascii
 import hashlib
+import importlib.util
 import fcntl
 import os
 import re
@@ -18,6 +19,7 @@ import select
 import sys
 import termios
 import time
+from pathlib import Path
 
 
 def configure_serial(fd: int, baud: int) -> None:
@@ -125,13 +127,67 @@ def perform_uart_transfer(fd: int, firmware: str, manifest: str | None,
     wait_serial(fd, re.compile(r"PMOSUART/1 COMPLETE firmware="), timeout)
     print("\n[serial] UART objects reconstructed and verified on the switch", flush=True)
 
+
+def run_liveboot_console(args: argparse.Namespace) -> int:
+    """Dispatch the pre-kernel PMOSLIVE state machine through this serial helper."""
+    helper = Path(__file__).with_name("bootloader-liveboot.py")
+    spec = importlib.util.spec_from_file_location("postmerkos_bootloader_liveboot", helper)
+    if spec is None or spec.loader is None:
+        print(f"[serial] unable to load PMOSLIVE helper: {helper}", file=sys.stderr)
+        return 2
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    forwarded = [
+        "--operation", args.operation,
+        "--liveboot-path", args.liveboot_path,
+        "--firmware", args.firmware,
+        "--target-model", args.target_model,
+        "--baud", str(args.baud),
+        "--chunk-size", str(args.liveboot_chunk_size),
+        "--frame-retries", str(args.liveboot_frame_retries),
+        "--ack-timeout", str(args.liveboot_ack_timeout),
+        "--ready-timeout", str(args.liveboot_ready_timeout),
+        "--boot-timeout", str(args.liveboot_boot_timeout),
+    ]
+    if args.device:
+        forwarded += ["--port", args.device]
+    if args.manifest:
+        forwarded += ["--manifest", args.manifest]
+    if args.payload:
+        forwarded += ["--payload", args.payload]
+    if args.payload_descriptor:
+        forwarded += ["--payload-descriptor", args.payload_descriptor]
+    for enabled, flag in (
+        (args.force, "--force"),
+        (args.manual_target_confirmation, "--manual-target-confirmation"),
+        (args.skip_baud_negotiation, "--skip-baud-negotiation"),
+        (args.diagnostic_baud_scan, "--diagnostic-baud-scan"),
+        (args.diagnostic_window_scan, "--diagnostic-window-scan"),
+        (args.verbose_acks, "--verbose-acks"),
+    ):
+        if enabled:
+            forwarded.append(flag)
+    try:
+        return int(module.main(forwarded))
+    except module.ProtocolError as exc:
+        print(f"PMOSLIVE error: {exc}", file=sys.stderr)
+        return 1
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--device", required=True)
+    parser = argparse.ArgumentParser(
+        description=(
+            "Drive either the running postmerkOS firmware updater or the pre-kernel "
+            "meraki-redboot PMOSLIVE state machine through hardware serial."
+        )
+    )
+    parser.add_argument("--console-mode", choices=("firmware", "liveboot"), default="firmware")
+    parser.add_argument("--device")
     parser.add_argument("--username", default="root")
-    parser.add_argument("--password-file", required=True)
-    parser.add_argument("--command", required=True)
-    parser.add_argument("--operation", choices=("verify", "dry-run", "flash"), required=True)
+    parser.add_argument("--password-file")
+    parser.add_argument("--command")
+    parser.add_argument("--operation", choices=("verify", "dry-run", "flash", "boot"), required=True)
     parser.add_argument("--mode", choices=("modern", "checksum", "legacy"), default="modern")
     parser.add_argument("--accept-untested", action="store_true")
     parser.add_argument("--accept-full-flash", action="store_true")
@@ -140,7 +196,40 @@ def main() -> int:
     parser.add_argument("--uart-firmware")
     parser.add_argument("--uart-manifest")
     parser.add_argument("--uart-chunk", type=int, default=1024)
+
+    live = parser.add_argument_group("PMOSLIVE pre-kernel mode")
+    live.add_argument("--liveboot-path", choices=("embedded", "ram-upload", "auto"), default="embedded")
+    live.add_argument("--payload")
+    live.add_argument("--payload-descriptor")
+    live.add_argument("--firmware")
+    live.add_argument("--manifest")
+    live.add_argument("--target-model", default="MS42P")
+    live.add_argument("--force", action="store_true")
+    live.add_argument("--manual-target-confirmation", action="store_true")
+    live.add_argument("--skip-baud-negotiation", action="store_true")
+    live.add_argument("--diagnostic-baud-scan", action="store_true")
+    live.add_argument("--diagnostic-window-scan", action="store_true")
+    live.add_argument("--verbose-acks", action="store_true")
+    live.add_argument("--liveboot-chunk-size", type=int, default=1024)
+    live.add_argument("--liveboot-frame-retries", type=int, default=3)
+    live.add_argument("--liveboot-ack-timeout", type=float, default=5.0)
+    live.add_argument("--liveboot-ready-timeout", type=float, default=90.0)
+    live.add_argument("--liveboot-boot-timeout", type=float, default=120.0)
     args = parser.parse_args()
+
+    if args.console_mode == "liveboot":
+        if args.operation not in {"verify", "dry-run", "boot"}:
+            parser.error("PMOSLIVE --operation must be verify, dry-run, or boot")
+        if not args.firmware:
+            parser.error("PMOSLIVE mode requires --firmware")
+        if args.operation != "verify" and not args.device:
+            parser.error("PMOSLIVE dry-run/boot requires --device")
+        return run_liveboot_console(args)
+
+    if args.operation not in {"verify", "dry-run", "flash"}:
+        parser.error("firmware console mode supports verify, dry-run, or flash")
+    if not args.device or not args.password_file or not args.command:
+        parser.error("firmware console mode requires --device, --password-file, and --command")
     if args.uart_chunk < 192 or args.uart_chunk > 3072:
         parser.error("--uart-chunk must be 192-3072 bytes")
     if args.uart_manifest and not args.uart_firmware:
