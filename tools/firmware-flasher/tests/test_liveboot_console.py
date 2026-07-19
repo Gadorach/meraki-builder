@@ -23,11 +23,12 @@ pv3 = load_module("test_pmosrec_v3_live", "pmosrec_v3.py")
 
 
 class LivebootConsoleTests(unittest.TestCase):
-    def ready_sequence(self) -> list[str]:
+    def ready_sequence(self, family: str = "jaguar1") -> list[str]:
+        family_id = bl.FAMILY_ID[family]
         return [
-            "PMOSLIVE READY 3 SOC=jaguar1 FAMILY=00000002 FLASH=0",
+            f"PMOSLIVE READY 3 SOC={family} FAMILY={family_id:08x} FLASH=0",
             (
-                "PMOSLIVE DESCRIPTOR PMOSLIVE3;SOC=jaguar1;FAMILY=2;PROTO=3;FLASH=0;LIVEBOOT=1;"
+                f"PMOSLIVE DESCRIPTOR PMOSLIVE3;SOC={family};FAMILY={family_id};PROTO=3;FLASH=0;LIVEBOOT=1;"
                 "IMAGE_BYTES=16777216;KERNEL=81000000;ROOTFS=87000000;MEM_MIB=120;"
                 "FRAME_MAX=4096;WINDOW_MAX=16;SPARSE=1;LZ4=1;END"
             ),
@@ -50,6 +51,26 @@ class LivebootConsoleTests(unittest.TestCase):
             *self.ready_sequence(),
         ]
         selected = bl.enter_liveboot(link, "embedded", 30.0, None, 1024, 3, 5.0)
+        self.assertEqual(selected, "embedded")
+        self.assertEqual(link.write_all.call_args_list[:2], [mock.call(b"\r"), mock.call(b"3")])
+
+
+    def test_luton26_embedded_menu_sequence_selects_family_payload(self) -> None:
+        link = mock.Mock()
+        link.wait_for.side_effect = [
+            "PMOSBOOT MENU-PROBE TIMEOUT_MS=00000bb8",
+            "PMOSBOOT PASS-MENU-TRIGGER: BYTE: 0x0000000D",
+            "PMOSBOOT MENU 1=UART-RAMLOADER 2=FW-RECOVERY 3=LIVEBOOT",
+            "PMOSBOOT MENU-READY TIMEOUT_MS=00001388",
+            "PMOSBOOT PASS-MENU-CHOICE: SELECTED: 0x00000003",
+            "PMOSBOOT INFO-LIVEBOOT: SOURCE: MENU-OPTION-3 | SOC: luton26",
+            "PMOSBOOT PASS-LIVEBOOT-COPY",
+            "PMOSBOOT PASS-LIVEBOOT-EXEC",
+            *self.ready_sequence("luton26"),
+        ]
+        selected = bl.enter_liveboot(
+            link, "embedded", 30.0, None, 1024, 3, 5.0, family="luton26"
+        )
         self.assertEqual(selected, "embedded")
         self.assertEqual(link.write_all.call_args_list[:2], [mock.call(b"\r"), mock.call(b"3")])
 

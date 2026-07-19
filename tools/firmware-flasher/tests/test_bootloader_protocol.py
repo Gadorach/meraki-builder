@@ -128,34 +128,41 @@ class BundleFixture:
             },
         }
         live_sha = "a" * 64
-        live_record = {
-            "filename": "pmoslive-jaguar1.bin",
-            "bytes": 27112,
-            "sha256": live_sha,
-            "soc_family_id": 2,
-            "accepted_models": ["MS42", "MS42P"],
-            "load_address": 0x86C00000,
-            "entry_address": 0x86C00000,
-            "entry_contract": "flat-binary-byte-zero-v1",
-            "flash_access": "none",
-            "transport_contract": "pmosrec-v3-adaptive-uart-sparse-lz4-v1",
-            "linux_handoff": "mips-legacy-argc-argv-envp-external-initrd-v1",
-            "platform_identity_handoff": "kernel-command-line-postmerkos-model-v1",
-            "kernel_boot_argument_contract": "vcoreiii-standard-mips-argc-argv-envp-fallback-v1",
-            "rootfs_handoff": "squashfs-as-legacy-initrd-v1",
-            "ram_layout": {
-                "kernel_load_address": 0x81000000,
-                "image_staging_address": 0x81400000,
-                "manifest_address": 0x82400000,
-                "payload_address": 0x86C00000,
-                "squashfs_address": 0x87000000,
-                "boot_params_physical_address": 0x00000400,
-                "boot_params_uncached_address": 0xA0000400,
-                "boot_params_bytes": 0x00000C00,
-                "linux_memory_mib": 120,
-                "top_reserved_mib": 8,
-            },
+        live_ram = {
+            "kernel_load_address": 0x81000000,
+            "image_staging_address": 0x81400000,
+            "manifest_address": 0x82400000,
+            "payload_address": 0x86C00000,
+            "squashfs_address": 0x87000000,
+            "boot_params_physical_address": 0x00000400,
+            "boot_params_uncached_address": 0xA0000400,
+            "boot_params_bytes": 0x00000C00,
+            "linux_memory_mib": 120,
+            "top_reserved_mib": 8,
         }
+        live_models = {
+            "luton26": ["MS22", "MS22P", "MS220-8", "MS220-8P", "MS220-24", "MS220-24P"],
+            "jaguar1": ["MS42", "MS42P"],
+        }
+        live_records = {}
+        for live_family, accepted_models in live_models.items():
+            live_records[live_family] = {
+                "filename": f"pmoslive-{live_family}.bin",
+                "bytes": 27112,
+                "sha256": live_sha,
+                "soc_family_id": bp.FAMILY_ID[live_family],
+                "accepted_models": accepted_models,
+                "load_address": 0x86C00000,
+                "entry_address": 0x86C00000,
+                "entry_contract": "flat-binary-byte-zero-v1",
+                "flash_access": "none",
+                "transport_contract": "pmosrec-v3-adaptive-uart-sparse-lz4-v1",
+                "linux_handoff": "mips-legacy-argc-argv-envp-external-initrd-v1",
+                "platform_identity_handoff": "kernel-command-line-postmerkos-model-v1",
+                "kernel_boot_argument_contract": "vcoreiii-standard-mips-argc-argv-envp-fallback-v1",
+                "rootfs_handoff": "squashfs-as-legacy-initrd-v1",
+                "ram_layout": dict(live_ram),
+            }
         data = {
             "version": "test",
             "target_family": "vcore3",
@@ -186,16 +193,19 @@ class BundleFixture:
                         }
                         for family, record in payload_records.items()
                     },
-                    "embedded_liveboot": {"jaguar1": {
-                        **dict(live_record),
-                        "kernel_load_address": 0x81000000,
-                        "squashfs_address": 0x87000000,
-                        "boot_params_physical_address": 0x00000400,
-                        "boot_params_uncached_address": 0xA0000400,
-                        "boot_params_bytes": 0x00000C00,
-                        "linux_memory_mib": 120,
-                        "top_reserved_mib": 8,
-                    }},
+                    "embedded_liveboot": {
+                        family: {
+                            **dict(record),
+                            "kernel_load_address": 0x81000000,
+                            "squashfs_address": 0x87000000,
+                            "boot_params_physical_address": 0x00000400,
+                            "boot_params_uncached_address": 0xA0000400,
+                            "boot_params_bytes": 0x00000C00,
+                            "linux_memory_mib": 120,
+                            "top_reserved_mib": 8,
+                        }
+                        for family, record in live_records.items()
+                    },
                 },
                 "uart_firmware": {
                     "enabled": True,
@@ -235,7 +245,7 @@ class BundleFixture:
                     "platform_identity_handoff": "kernel-command-line-postmerkos-model-v1",
                     "kernel_boot_argument_contract": "vcoreiii-standard-mips-argc-argv-envp-fallback-v1",
                     "rootfs_handoff": "squashfs-as-legacy-initrd-v1",
-                    "payloads": {"jaguar1": live_record},
+                    "payloads": live_records,
                 },
             },
             "artifact": {
@@ -781,6 +791,30 @@ class ProtocolTests(unittest.TestCase):
                     require_liveboot=True,
                 )
 
+
+    def test_luton26_liveboot_bundle_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            bundle = BundleFixture(Path(temp), model="MS220-24P")
+            info = bp.validate_bundle(
+                bundle.image, bundle.manifest, "MS220-24P", force=False, require_liveboot=True
+            )
+            self.assertEqual(info.family, "luton26")
+            manifest = json.loads(bundle.manifest.read_text())
+            record = bp._liveboot_payload_record(manifest, "MS220-24P")
+            self.assertEqual(record["soc_family_id"], 1)
+            self.assertEqual(record["accepted_models"], bp.LIVEBOOT_MODELS["luton26"])
+
+    def test_luton26_liveboot_rejects_jaguar_payload_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            bundle = BundleFixture(Path(temp), model="MS220-24P")
+            manifest = json.loads(bundle.manifest.read_text())
+            manifest["recovery"]["uart_liveboot"]["payloads"].pop("luton26")
+            bundle.manifest.write_text(json.dumps(manifest) + "\n")
+            with self.assertRaisesRegex(bp.ProtocolError, "no luton26 PMOSLIVE"):
+                bp.validate_bundle(
+                    bundle.image, bundle.manifest, "MS220-24P", force=False, require_liveboot=True
+                )
+
     def test_liveboot_verify_validates_payload_without_opening_serial(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -799,6 +833,7 @@ class ProtocolTests(unittest.TestCase):
                 "protocol_version": 3,
                 "soc_family": "jaguar1",
                 "soc_family_id": 2,
+                "accepted_models": ["MS42", "MS42P"],
                 "flash_access": "none",
                 "load_address": 0x86C00000,
                 "entry_address": 0x86C00000,

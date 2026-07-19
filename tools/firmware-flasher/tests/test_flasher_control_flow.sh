@@ -161,6 +161,24 @@ liveboot_cli_output=$(
 )
 grep -Fq 'REACHED-LIVEBOOT operation=liveboot-verify path=embedded control=liveboot' <<<"$liveboot_cli_output"
 
+# Luton26 targets must be exposed by the integrated CLI and route through the
+# same liveboot dispatcher without requiring Jaguar1 defaults.
+luton_liveboot_cli_output=$(
+    bash -Eeuo pipefail -c '
+        source "$1"
+        need() { :; }
+        select_firmware() { SELECTED_FIRMWARE=/tmp/live.bin; SELECTED_TYPE=full; }
+        manifest_declares_liveboot() { return 0; }
+        run_liveboot_mode() {
+            printf "REACHED-LUTON-LIVEBOOT operation=%s path=%s target=%s control=%s\n" \
+                "$OPERATION" "$LIVEBOOT_PATH" "$TARGET_MODEL" "$CONTROL_PATH"
+        }
+        main --liveboot-verify --liveboot-path ram-upload --target-model MS220-24P
+    ' bash "$FLASHER" 2>&1
+)
+grep -Fq 'REACHED-LUTON-LIVEBOOT operation=liveboot-verify path=ram-upload target=MS220-24P control=liveboot' \
+    <<<"$luton_liveboot_cli_output"
+
 # Interactive PMOSLIVE selection must also expose the entry-path prompt.
 interactive_liveboot_output=$(printf '7\n2\n' | bash -Eeuo pipefail -c '
     source "$1"

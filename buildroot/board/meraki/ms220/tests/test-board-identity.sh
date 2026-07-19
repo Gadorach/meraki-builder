@@ -48,6 +48,22 @@ grep -q '^MODEL=MS42P$' "$TMP/run/boardinfo"
 grep -q '^PRODUCT_NUMBER=600-21020$' "$TMP/run/boardinfo"
 grep -q '^IDENTITY_SOURCE=pmoslive-command-line$' "$TMP/run/boardinfo"
 grep -q '^IDENTITY_VOLATILE=1$' "$TMP/run/boardinfo"
+# All Luton26 live targets must resolve through the command-line fallback with
+# their exact product number and profile.
+for pair in \
+  'MS22 600-20010' 'MS22P 600-20020' \
+  'MS220-24 600-20030' 'MS220-24P 600-20040' \
+  'MS220-8 600-28010' 'MS220-8P 600-28020'; do
+  set -- $pair
+  printf '%s\n' "postmerkos.live=1 postmerkos.model=$1 root=/dev/ram0" >"$TMP/cmdline"
+  POSTMERKOS_RUN_DIR="$TMP/run" POSTMERKOS_BOARDINFO="$TMP/run/boardinfo" \
+  POSTMERKOS_BOARD_DATA="$TMP/board_data" POSTMERKOS_BOARD_PROFILE="$PROFILE" \
+  POSTMERKOS_PROC_CMDLINE="$TMP/cmdline" POSTMERKOS_LIVE_MARKER="$TMP/no-marker" \
+    "$IDENTITY" >"$TMP/live-luton.console"
+  grep -q "^PMOSLIVE PLATFORM-READY MODEL=$1 SOURCE=pmoslive-command-line$" "$TMP/live-luton.console"
+  grep -q "^MODEL=$1$" "$TMP/run/boardinfo"
+  grep -q "^PRODUCT_NUMBER=$2$" "$TMP/run/boardinfo"
+done
 # The command-line hint is accepted only for a live boot and only for a model
 # supported by the exact profile table.
 printf '%s\n' 'console=ttyS0 postmerkos.model=MS42P root=/dev/ram0' >"$TMP/cmdline"

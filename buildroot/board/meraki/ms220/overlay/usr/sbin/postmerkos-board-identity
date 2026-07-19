@@ -23,6 +23,12 @@ live_boot() {
 }
 product_for_model() {
   case "$1" in
+    MS22) printf '%s\n' 600-20010 ;;
+    MS22P) printf '%s\n' 600-20020 ;;
+    MS220-24) printf '%s\n' 600-20030 ;;
+    MS220-24P) printf '%s\n' 600-20040 ;;
+    MS220-8) printf '%s\n' 600-28010 ;;
+    MS220-8P) printf '%s\n' 600-28020 ;;
     MS42) printf '%s\n' 600-21010 ;;
     MS42P) printf '%s\n' 600-21020 ;;
     *) return 1 ;;

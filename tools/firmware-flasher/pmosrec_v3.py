@@ -15,7 +15,7 @@ import time
 import zlib
 from typing import Callable, Iterable, Sequence
 
-from bootloader_protocol import ProtocolError, SerialLink, BundleInfo
+from bootloader_protocol import FAMILY_ID, LIVEBOOT_MODELS, ProtocolError, SerialLink, BundleInfo
 
 PROTOCOL_VERSION = 3
 FULL_IMAGE_SIZE = 16 * 1024 * 1024
@@ -873,10 +873,11 @@ def make_live_package_header(bundle: BundleInfo, image_plan: RepresentationPlan,
     model = bundle.model.encode("ascii")
     if len(model) > 15:
         raise ProtocolError("target model does not fit the PMOSLIVE v3 header")
-    if bundle.family != "jaguar1" or bundle.model not in {"MS42", "MS42P"}:
-        raise ProtocolError("PMOSLIVE currently accepts only MS42/MS42P Jaguar1 images")
+    accepted_models = LIVEBOOT_MODELS.get(bundle.family)
+    if accepted_models is None or bundle.model not in accepted_models:
+        raise ProtocolError(f"PMOSLIVE does not accept {bundle.model} on {bundle.family}")
     fields = (
-        PACKAGE_MAGIC, PROTOCOL_VERSION, flags, 2, FULL_IMAGE_SIZE, len(bundle.manifest_bytes),
+        PACKAGE_MAGIC, PROTOCOL_VERSION, flags, FAMILY_ID[bundle.family], FULL_IMAGE_SIZE, len(bundle.manifest_bytes),
         image_plan.frame_size, window_size, image_plan.mode, len(image_plan.frames),
         len(manifest_plan.frames), image_plan.wire_bytes, bundle.manifest_crc32,
         bundle.image_crc32, bundle.image_sha256, bundle.manifest_sha256,

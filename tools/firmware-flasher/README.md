@@ -49,7 +49,7 @@ runs, and complete RAM boots:
 ```
 
 `--liveboot-path` accepts `embedded`, `ram-upload`, or `auto`. RAM upload uses
-`artifacts/liveboot/pmoslive-jaguar1.bin` by default; override it with
+`artifacts/liveboot/pmoslive-<soc-family>.bin` by default; override it with
 `--liveboot-payload` and `--liveboot-descriptor`. The RAM-upload path accepts
 both the legacy two-option RedBoot menu and the newer three-option menu. In
 `auto` mode, a legacy menu is detected in place and option 1 is selected

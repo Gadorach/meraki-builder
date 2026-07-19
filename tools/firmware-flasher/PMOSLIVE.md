@@ -1,8 +1,26 @@
-# PMOSLIVE RAM boot for MS42/MS42P
+# PMOSLIVE RAM boot for supported VCore-III switches
 
-PMOSLIVE is a Jaguar1-only, flash-write-free payload built from the proven
+PMOSLIVE provides family-specific Luton26 and Jaguar1 flash-write-free payloads built from the proven
 PMOSREC v3 UART transport. It is intended for repeated development boots of the
 normal retail meraki-builder image without erasing or programming NOR.
+
+## Supported live-boot targets
+
+Luton26 payload:
+
+- `MS22`, `MS22P`
+- `MS220-8`, `MS220-8P`
+- `MS220-24`, `MS220-24P`
+
+Jaguar1 payload:
+
+- `MS42`, `MS42P`
+
+The retail kernel and rootfs remain common. RedBoot stage 1 detects the SoC and
+copies the matching embedded PMOSLIVE payload for menu option 3. RAM-upload
+mode selects the standalone payload from the exact target model. Other Jaguar1
+models retain ordinary firmware recovery support but are not declared
+PMOSLIVE-capable until their runtime identity and RAM assumptions are validated.
 
 ## Runtime map
 
@@ -89,6 +107,11 @@ live boot.
   --firmware artifacts/<full-image>.bin \
   --liveboot-verify --target-model MS42P
 
+# Luton26 example (payload family is selected from the exact model).
+./tools/firmware-flasher/firmware-flasher.sh \
+  --firmware artifacts/<full-image>.bin \
+  --liveboot-verify --target-model MS220-24P
+
 # Full transfer and target parsing without entering Linux.
 ./tools/firmware-flasher/firmware-flasher.sh \
   --firmware artifacts/<full-image>.bin \
@@ -105,7 +128,7 @@ live boot.
 ```
 
 The path can be `embedded`, `ram-upload`, or `auto`. A ram-upload/auto run uses
-`artifacts/liveboot/pmoslive-jaguar1.bin` and its adjacent descriptor unless
+`artifacts/liveboot/pmoslive-<soc-family>.bin` and its adjacent descriptor unless
 `--liveboot-payload` and `--liveboot-descriptor` override them. `ram-upload` is
 compatible with older RedBoot builds whose menu contains only options 1 and 2.
 `auto` inspects the advertised menu: it selects embedded option 3 when present,
@@ -153,10 +176,11 @@ kernel-header archive. The release-manifest writer also verifies that the SPIM
 payload matches this record before publishing live capability.
 
 
-Platform completion attestation:
+Platform completion attestation is model-specific. Examples:
 
 ```text
+PMOSLIVE PLATFORM-READY MODEL=MS220-24P SOURCE=pmoslive-command-line
 PMOSLIVE PLATFORM-READY MODEL=MS42P SOURCE=pmoslive-command-line
 ```
 
-The host flasher waits for this marker after the RAM-root userspace attestation and verifies that the reported model matches the selected firmware target.
+The host flasher waits for this marker after the RAM-root userspace attestation and verifies that the reported model exactly matches the selected hardware target.

@@ -21,6 +21,8 @@ required=(
   "$RECOVERY_ARTIFACT_DIR/recovery-luton26.descriptor.json"
   "$RECOVERY_ARTIFACT_DIR/recovery-jaguar1.bin"
   "$RECOVERY_ARTIFACT_DIR/recovery-jaguar1.descriptor.json"
+  "$LIVEBOOT_ARTIFACT_DIR/pmoslive-luton26.bin"
+  "$LIVEBOOT_ARTIFACT_DIR/pmoslive-luton26.descriptor.json"
   "$LIVEBOOT_ARTIFACT_DIR/pmoslive-jaguar1.bin"
   "$LIVEBOOT_ARTIFACT_DIR/pmoslive-jaguar1.descriptor.json"
   "$DONOR_ROOT/lib/modules/postmerkos-required-modules.txt"
@@ -143,34 +145,11 @@ for family, (fid, spi, expected_models) in expected_targets.items():
     if embedded_record.get("adaptive_transport_contract") != "pmosrec-v3-adaptive-uart-sparse-lz4-v1":
         raise SystemExit(f"{payload.name} embedded recovery lacks adaptive PMOSREC v3 transport")
 
-live_payload = liveboot_dir / "pmoslive-jaguar1.bin"
-live_descriptor_path = liveboot_dir / "pmoslive-jaguar1.descriptor.json"
-live_data = live_payload.read_bytes()
-live_descriptor = json.loads(live_descriptor_path.read_text(encoding="utf-8"))
-live_marker = (
-    b"PMOSLIVE3;SOC=jaguar1;FAMILY=2;PROTO=3;FLASH=0;LIVEBOOT=1;"
-    b"IMAGE_BYTES=16777216;KERNEL=81000000;ROOTFS=87000000;MEM_MIB=120;"
-    b"FRAME_MAX=4096;WINDOW_MAX=16;SPARSE=1;LZ4=1;END"
-)
-if live_data.count(live_marker) != 1:
-    raise SystemExit("PMOSLIVE target descriptor mismatch")
-if any(marker in live_data for marker in (b"ERASEFLASH", b"FLASH-PREFLIGHT", b"PROGRESS ERASE", b"PROGRESS PROGRAM")):
-    raise SystemExit("PMOSLIVE unexpectedly contains flash-write markers")
-if live_descriptor.get("format") != "postmerkos.uart-liveboot-payload.v1" or live_descriptor.get("protocol_version") != 3:
-    raise SystemExit("PMOSLIVE descriptor format/protocol mismatch")
-if live_descriptor.get("soc_family") != "jaguar1" or live_descriptor.get("soc_family_id") != 2:
-    raise SystemExit("PMOSLIVE descriptor family mismatch")
-if live_descriptor.get("accepted_models") != ["MS42", "MS42P"]:
-    raise SystemExit("PMOSLIVE descriptor model allow-list mismatch")
-if live_descriptor.get("operations") != ["verify", "dry-run", "liveboot"] or live_descriptor.get("flash_access") != "none":
-    raise SystemExit("PMOSLIVE descriptor operation/flash contract mismatch")
-if live_descriptor.get("load_address") != 0x86C00000 or live_descriptor.get("entry_address") != 0x86C00000:
-    raise SystemExit("PMOSLIVE descriptor high-memory load/entry mismatch")
-if live_descriptor.get("transport_contract") != "pmosrec-v3-adaptive-uart-sparse-lz4-v1":
-    raise SystemExit("PMOSLIVE descriptor transport contract mismatch")
-if live_descriptor.get("platform_identity_handoff") != "kernel-command-line-postmerkos-model-v1":
-    raise SystemExit("PMOSLIVE descriptor platform identity handoff mismatch")
-expected_ram = {
+live_expected = {
+    "luton26": (1, ["MS22", "MS22P", "MS220-8", "MS220-8P", "MS220-24", "MS220-24P"]),
+    "jaguar1": (2, ["MS42", "MS42P"]),
+}
+expected_live_ram = {
     "kernel_load_address": 0x81000000,
     "image_staging_address": 0x81400000,
     "manifest_address": 0x82400000,
@@ -182,36 +161,73 @@ expected_ram = {
     "linux_memory_mib": 120,
     "top_reserved_mib": 8,
 }
-if live_descriptor.get("ram_layout") != expected_ram:
-    raise SystemExit("PMOSLIVE descriptor RAM layout mismatch")
-binary = live_descriptor.get("binary", {})
-live_digest = hashlib.sha256(live_data).hexdigest()
-if binary.get("filename") != live_payload.name or binary.get("bytes") != len(live_data) or str(binary.get("sha256", "")).lower() != live_digest:
-    raise SystemExit("PMOSLIVE descriptor binary binding mismatch")
-embedded_live = cap.get("embedded_liveboot", {}).get("jaguar1", {})
-if embedded_live.get("size") != len(live_data) or str(embedded_live.get("sha256", "")).lower() != live_digest:
-    raise SystemExit("PMOSLIVE standalone payload does not match the loader embedding")
-expected_embedded = {
-    "load_address": 0x86C00000,
-    "entry_address": 0x86C00000,
-    "entry_contract": "flat-binary-byte-zero-v1",
-    "flash_access": "none",
-    "accepted_models": ["MS42", "MS42P"],
-    "transport_contract": "pmosrec-v3-adaptive-uart-sparse-lz4-v1",
-    "linux_handoff": "mips-legacy-argc-argv-envp-external-initrd-v1",
-    "platform_identity_handoff": "kernel-command-line-postmerkos-model-v1",
-    "rootfs_handoff": "squashfs-as-legacy-initrd-v1",
-    "kernel_load_address": 0x81000000,
-    "squashfs_address": 0x87000000,
-    "boot_params_physical_address": 0x00000400,
-    "boot_params_uncached_address": 0xA0000400,
-    "boot_params_bytes": 0x00000C00,
-    "linux_memory_mib": 120,
-    "top_reserved_mib": 8,
-}
-for key, value in expected_embedded.items():
-    if embedded_live.get(key) != value:
-        raise SystemExit(f"loader embedded PMOSLIVE {key} mismatch")
+for family, (family_id, models) in live_expected.items():
+    live_payload = liveboot_dir / f"pmoslive-{family}.bin"
+    live_descriptor_path = liveboot_dir / f"pmoslive-{family}.descriptor.json"
+    if not live_payload.is_file() or not live_descriptor_path.is_file():
+        raise SystemExit(f"PMOSLIVE build output is missing for {family}")
+    live_raw = live_payload.read_bytes()
+    live_descriptor = json.loads(live_descriptor_path.read_text(encoding="utf-8"))
+    live_marker = (
+        f"PMOSLIVE3;SOC={family};FAMILY={family_id};PROTO=3;FLASH=0;LIVEBOOT=1;"
+        "IMAGE_BYTES=16777216;KERNEL=81000000;ROOTFS=87000000;MEM_MIB=120;"
+        "FRAME_MAX=4096;WINDOW_MAX=16;SPARSE=1;LZ4=1;END"
+    ).encode("ascii")
+    if live_raw.count(live_marker) != 1:
+        raise SystemExit(f"{live_payload.name} has an invalid embedded target descriptor")
+    if any(marker in live_raw for marker in (b"ERASEFLASH", b"FLASH-PREFLIGHT", b"PROGRESS ERASE", b"PROGRESS PROGRAM")):
+        raise SystemExit(f"{live_payload.name} unexpectedly retains flash-write markers")
+    if live_descriptor.get("format") != "postmerkos.uart-liveboot-payload.v1" or live_descriptor.get("protocol_version") != 3:
+        raise SystemExit(f"{live_payload.name} descriptor format/protocol is unsupported")
+    if live_descriptor.get("soc_family") != family or live_descriptor.get("soc_family_id") != family_id:
+        raise SystemExit(f"{live_payload.name} descriptor family is invalid")
+    if live_descriptor.get("accepted_models") != models:
+        raise SystemExit(f"{live_payload.name} descriptor target allow-list is invalid")
+    if live_descriptor.get("operations") != ["verify", "dry-run", "liveboot"] or live_descriptor.get("flash_access") != "none":
+        raise SystemExit(f"{live_payload.name} descriptor operation/flash policy is invalid")
+    if live_descriptor.get("load_address") != 0x86C00000 or live_descriptor.get("entry_address") != 0x86C00000:
+        raise SystemExit(f"{live_payload.name} descriptor high-memory address is invalid")
+    if live_descriptor.get("entry_contract") != "flat-binary-byte-zero-v1":
+        raise SystemExit(f"{live_payload.name} descriptor entry contract is invalid")
+    if live_descriptor.get("transport_contract") != "pmosrec-v3-adaptive-uart-sparse-lz4-v1":
+        raise SystemExit(f"{live_payload.name} descriptor transport contract is invalid")
+    if live_descriptor.get("linux_handoff") != "mips-legacy-argc-argv-envp-external-initrd-v1":
+        raise SystemExit(f"{live_payload.name} descriptor Linux handoff is invalid")
+    if live_descriptor.get("platform_identity_handoff") != "kernel-command-line-postmerkos-model-v1":
+        raise SystemExit(f"{live_payload.name} descriptor platform identity handoff is invalid")
+    if live_descriptor.get("rootfs_handoff") != "squashfs-as-legacy-initrd-v1":
+        raise SystemExit(f"{live_payload.name} descriptor rootfs handoff is invalid")
+    if live_descriptor.get("ram_layout") != expected_live_ram:
+        raise SystemExit(f"{live_payload.name} descriptor RAM layout is invalid")
+    binary = live_descriptor.get("binary", {})
+    digest = hashlib.sha256(live_raw).hexdigest()
+    if binary.get("filename") != live_payload.name or binary.get("bytes") != len(live_raw) or str(binary.get("sha256", "")).lower() != digest:
+        raise SystemExit(f"{live_payload.name} descriptor binary record mismatch")
+    embedded_live = cap.get("embedded_liveboot", {}).get(family, {})
+    if embedded_live.get("size") != len(live_raw) or str(embedded_live.get("sha256", "")).lower() != digest:
+        raise SystemExit(f"{live_payload.name} standalone payload does not match loader embedding")
+    expected_embedded = {
+        "load_address": 0x86C00000,
+        "entry_address": 0x86C00000,
+        "entry_contract": "flat-binary-byte-zero-v1",
+        "flash_access": "none",
+        "accepted_models": models,
+        "transport_contract": "pmosrec-v3-adaptive-uart-sparse-lz4-v1",
+        "linux_handoff": "mips-legacy-argc-argv-envp-external-initrd-v1",
+        "platform_identity_handoff": "kernel-command-line-postmerkos-model-v1",
+        "rootfs_handoff": "squashfs-as-legacy-initrd-v1",
+        "kernel_load_address": 0x81000000,
+        "squashfs_address": 0x87000000,
+        "boot_params_physical_address": 0x00000400,
+        "boot_params_uncached_address": 0xA0000400,
+        "boot_params_bytes": 0x00000C00,
+        "linux_memory_mib": 120,
+        "top_reserved_mib": 8,
+    }
+    for key, value in expected_embedded.items():
+        if embedded_live.get(key) != value:
+            raise SystemExit(f"loader embedded {family} PMOSLIVE {key} mismatch")
+
 PY
 
 python3 "$SCRIPT_DIR/kernel-build-contract.py" verify \

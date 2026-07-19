@@ -178,69 +178,70 @@ for family, target in targets.items():
         json.dumps(descriptor, indent=2, sort_keys=True) + '\n'
     )
 
-live_marker = (
-    b"PMOSLIVE3;SOC=jaguar1;FAMILY=2;PROTO=3;FLASH=0;LIVEBOOT=1;"
-    b"IMAGE_BYTES=16777216;KERNEL=81000000;ROOTFS=87000000;MEM_MIB=120;"
-    b"FRAME_MAX=4096;WINDOW_MAX=16;SPARSE=1;LZ4=1;END"
-)
-live_payload = liveboot / 'pmoslive-jaguar1.bin'
-live_payload.write_bytes(b'smoke-liveboot\0' + live_marker + b'\0')
-live_raw = live_payload.read_bytes()
-live_digest = hashlib.sha256(live_raw).hexdigest()
 live_ram = {
-    'kernel_load_address': 0x81000000,
-    'image_staging_address': 0x81400000,
-    'manifest_address': 0x82400000,
-    'payload_address': 0x86C00000,
-    'squashfs_address': 0x87000000,
-    'boot_params_physical_address': 0x00000400,
-    'boot_params_uncached_address': 0xA0000400,
-    'boot_params_bytes': 0x00000C00,
-    'linux_memory_mib': 120,
-    'top_reserved_mib': 8,
+    "kernel_load_address": 0x81000000,
+    "image_staging_address": 0x81400000,
+    "manifest_address": 0x82400000,
+    "payload_address": 0x86C00000,
+    "squashfs_address": 0x87000000,
+    "boot_params_physical_address": 0x00000400,
+    "boot_params_uncached_address": 0xA0000400,
+    "boot_params_bytes": 0x00000C00,
+    "linux_memory_mib": 120,
+    "top_reserved_mib": 8,
 }
-live_descriptor = {
-    'format': 'postmerkos.uart-liveboot-payload.v1',
-    'protocol_version': 3,
-    'soc_family': 'jaguar1',
-    'soc_family_id': 2,
-    'accepted_models': ['MS42', 'MS42P'],
-    'operations': ['verify', 'dry-run', 'liveboot'],
-    'flash_access': 'none',
-    'load_address': 0x86C00000,
-    'entry_address': 0x86C00000,
-    'entry_contract': 'flat-binary-byte-zero-v1',
-    'transport_contract': 'pmosrec-v3-adaptive-uart-sparse-lz4-v1',
-    'linux_handoff': 'mips-legacy-argc-argv-envp-external-initrd-v1',
-    'platform_identity_handoff': 'kernel-command-line-postmerkos-model-v1',
-    'rootfs_handoff': 'squashfs-as-legacy-initrd-v1',
-    'image': {'bytes': 0x1000000, 'kernel_offset': 0x40000, 'squashfs_offset': 0x300000},
-    'ram_layout': live_ram,
-    'binary': {'filename': live_payload.name, 'bytes': len(live_raw), 'sha256': live_digest},
+live_targets = {
+    "luton26": (1, ["MS22", "MS22P", "MS220-8", "MS220-8P", "MS220-24", "MS220-24P"]),
+    "jaguar1": (2, ["MS42", "MS42P"]),
 }
-(liveboot / 'pmoslive-jaguar1.descriptor.json').write_text(
-    json.dumps(live_descriptor, indent=2, sort_keys=True) + '\n'
-)
-embedded_live = {
-    'size': len(live_raw),
-    'sha256': live_digest,
-    'load_address': 0x86C00000,
-    'entry_address': 0x86C00000,
-    'entry_contract': 'flat-binary-byte-zero-v1',
-    'flash_access': 'none',
-    'accepted_models': ['MS42', 'MS42P'],
-    'transport_contract': 'pmosrec-v3-adaptive-uart-sparse-lz4-v1',
-    'linux_handoff': 'mips-legacy-argc-argv-envp-external-initrd-v1',
-    'platform_identity_handoff': 'kernel-command-line-postmerkos-model-v1',
-    'rootfs_handoff': 'squashfs-as-legacy-initrd-v1',
-    'kernel_load_address': 0x81000000,
-    'squashfs_address': 0x87000000,
-    'boot_params_physical_address': 0x00000400,
-    'boot_params_uncached_address': 0xA0000400,
-    'boot_params_bytes': 0x00000C00,
-    'linux_memory_mib': 120,
-    'top_reserved_mib': 8,
-}
+embedded_live = {}
+for family, (family_id, accepted_models) in live_targets.items():
+    live_marker = (
+        f"PMOSLIVE3;SOC={family};FAMILY={family_id};PROTO=3;FLASH=0;LIVEBOOT=1;"
+        "IMAGE_BYTES=16777216;KERNEL=81000000;ROOTFS=87000000;MEM_MIB=120;"
+        "FRAME_MAX=4096;WINDOW_MAX=16;SPARSE=1;LZ4=1;END"
+    ).encode("ascii")
+    live_payload = liveboot / f"pmoslive-{family}.bin"
+    live_payload.write_bytes(b"fixture-live\0" + live_marker + b"\0")
+    live_raw = live_payload.read_bytes()
+    live_digest = hashlib.sha256(live_raw).hexdigest()
+    live_descriptor = {
+        "format": "postmerkos.uart-liveboot-payload.v1",
+        "protocol_version": 3,
+        "soc_family": family,
+        "soc_family_id": family_id,
+        "accepted_models": accepted_models,
+        "operations": ["verify", "dry-run", "liveboot"],
+        "flash_access": "none",
+        "load_address": 0x86C00000,
+        "entry_address": 0x86C00000,
+        "entry_contract": "flat-binary-byte-zero-v1",
+        "transport_contract": "pmosrec-v3-adaptive-uart-sparse-lz4-v1",
+        "linux_handoff": "mips-legacy-argc-argv-envp-external-initrd-v1",
+        "platform_identity_handoff": "kernel-command-line-postmerkos-model-v1",
+        "rootfs_handoff": "squashfs-as-legacy-initrd-v1",
+        "image": {"bytes": 0x1000000, "kernel_offset": 0x40000, "squashfs_offset": 0x300000},
+        "ram_layout": live_ram,
+        "binary": {"filename": live_payload.name, "bytes": len(live_raw), "sha256": live_digest},
+    }
+    (liveboot / f"pmoslive-{family}.descriptor.json").write_text(
+        json.dumps(live_descriptor, indent=2, sort_keys=True) + "\n"
+    )
+    embedded_live[family] = {
+        "path": str(live_payload), "size": len(live_raw), "sha256": live_digest,
+        "load_address": 0x86C00000, "entry_address": 0x86C00000,
+        "entry_contract": "flat-binary-byte-zero-v1", "flash_access": "none",
+        "accepted_models": accepted_models,
+        "transport_contract": "pmosrec-v3-adaptive-uart-sparse-lz4-v1",
+        "linux_handoff": "mips-legacy-argc-argv-envp-external-initrd-v1",
+        "platform_identity_handoff": "kernel-command-line-postmerkos-model-v1",
+        "rootfs_handoff": "squashfs-as-legacy-initrd-v1",
+        "kernel_load_address": 0x81000000, "squashfs_address": 0x87000000,
+        "boot_params_physical_address": 0x00000400,
+        "boot_params_uncached_address": 0xA0000400,
+        "boot_params_bytes": 0x00000C00,
+        "linux_memory_mib": 120, "top_reserved_mib": 8,
+    }
 
 loader = image_data[:0x40000]
 Path(loader_output).write_text(json.dumps({
@@ -274,7 +275,7 @@ Path(loader_output).write_text(json.dumps({
         'stage1_flash_offset': 0x00020000,
         'stage1_storage_contract': 'single-shared-boot-region-blob-v1',
         'embedded_recovery': embedded,
-        'embedded_liveboot': {'jaguar1': embedded_live},
+        'embedded_liveboot': embedded_live,
     },
 }, indent=2, sort_keys=True) + '\n')
 PY

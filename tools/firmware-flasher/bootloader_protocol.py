@@ -61,6 +61,10 @@ MODEL_FAMILY = {
 }
 FAMILY_ID = {"luton26": 1, "jaguar1": 2}
 FAMILY_SPI_ADDRESS = {"luton26": 0x70000064, "jaguar1": 0x70000068}
+LIVEBOOT_MODELS = {
+    "luton26": ["MS22", "MS22P", "MS220-8", "MS220-8P", "MS220-24", "MS220-24P"],
+    "jaguar1": ["MS42", "MS42P"],
+}
 ALLOWED_MODEL_STATUS = {"validated", "confirmed", "untested"}
 DESCRIPTOR_RE = re.compile(
     rb"PMOSRECOVERY3;SOC=(luton26|jaguar1);FAMILY=([12]);SPI=([0-9a-f]{8});PROTO=3;PREFLIGHT=4;BAUDTEST=1;FRAME_MAX=4096;WINDOW_MAX=16;ACKFMT=BIN1;SPARSE=1;LZ4=1;CONFIRM_RETRY=1;AUTO_CONFIRM=1;AUTO_REBOOT=1;END"
@@ -254,9 +258,9 @@ def _validate_loader_capability(manifest: dict, loader_sha256: str, family: str,
         )
     if require_liveboot:
         live = loader.get("embedded_liveboot")
-        live_record = live.get("jaguar1") if isinstance(live, dict) else None
+        live_record = live.get(family) if isinstance(live, dict) else None
         if not isinstance(live_record, dict):
-            raise ProtocolError("firmware loader does not bind an embedded Jaguar1 PMOSLIVE payload")
+            raise ProtocolError(f"firmware loader does not bind an embedded {family} PMOSLIVE payload")
         if not re.fullmatch(r"[0-9a-fA-F]{64}", str(live_record.get("sha256", ""))):
             raise ProtocolError("firmware loader PMOSLIVE binding has an invalid SHA-256")
         if live_record.get("load_address") != 0x86C00000 or live_record.get("entry_address") != 0x86C00000:
@@ -265,7 +269,7 @@ def _validate_loader_capability(manifest: dict, loader_sha256: str, family: str,
             raise ProtocolError("firmware loader PMOSLIVE payload lacks the byte-zero entry contract")
         if live_record.get("flash_access") != "none":
             raise ProtocolError("firmware loader PMOSLIVE payload is not declared flash-write-free")
-        if live_record.get("accepted_models") != ["MS42", "MS42P"]:
+        if live_record.get("accepted_models") != LIVEBOOT_MODELS[family]:
             raise ProtocolError("firmware loader PMOSLIVE target allow-list is incompatible")
         if live_record.get("transport_contract") != "pmosrec-v3-adaptive-uart-sparse-lz4-v1":
             raise ProtocolError("firmware loader PMOSLIVE transport contract is incompatible")
@@ -494,14 +498,17 @@ def _liveboot_payload_record(manifest: dict, model: str) -> dict:
         raise ProtocolError("manifest kernel build-contract digest is missing or invalid")
     if liveboot.get("rootfs_handoff") != "squashfs-as-legacy-initrd-v1":
         raise ProtocolError("manifest UART liveboot rootfs handoff is incompatible")
+    family = MODEL_FAMILY.get(model)
+    if family not in LIVEBOOT_MODELS or model not in LIVEBOOT_MODELS[family]:
+        raise ProtocolError(f"PMOSLIVE does not support target model {model}")
     payloads = liveboot.get("payloads")
-    record = payloads.get("jaguar1") if isinstance(payloads, dict) else None
+    record = payloads.get(family) if isinstance(payloads, dict) else None
     if not isinstance(record, dict):
-        raise ProtocolError("manifest has no Jaguar1 PMOSLIVE payload record")
-    if record.get("soc_family_id") != 2:
+        raise ProtocolError(f"manifest has no {family} PMOSLIVE payload record")
+    if record.get("soc_family_id") != FAMILY_ID[family]:
         raise ProtocolError("manifest PMOSLIVE family ID is incompatible")
     accepted_models = record.get("accepted_models")
-    if accepted_models != ["MS42", "MS42P"] or model not in accepted_models:
+    if accepted_models != LIVEBOOT_MODELS[family] or model not in accepted_models:
         raise ProtocolError(f"manifest PMOSLIVE payload does not accept {model}")
     if not isinstance(record.get("bytes"), int) or not 0 < record["bytes"] <= 4 * 1024 * 1024:
         raise ProtocolError("manifest PMOSLIVE payload size is invalid")
@@ -622,8 +629,9 @@ def validate_bundle(image: Path, manifest_path: Path, model: str, *, force: bool
     )
     _recovery_payload_record(manifest, MODEL_FAMILY[model], model)
     if require_liveboot:
-        if model not in {"MS42", "MS42P"}:
-            raise ProtocolError("PMOSLIVE currently supports Jaguar1 MS42/MS42P only")
+        family = MODEL_FAMILY[model]
+        if family not in LIVEBOOT_MODELS or model not in LIVEBOOT_MODELS[family]:
+            raise ProtocolError(f"PMOSLIVE does not support target model {model}")
         _liveboot_payload_record(manifest, model)
     markers = [
         b"PMOSRAM READY 2",

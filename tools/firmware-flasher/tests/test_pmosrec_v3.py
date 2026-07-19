@@ -234,7 +234,30 @@ class PMOSRECv3Tests(unittest.TestCase):
         self.assertEqual(fields[1], 3)
         self.assertTrue(flags & p3.FLAG_LIVE_BOOT)
         self.assertFalse(flags & 1)
+        self.assertEqual(fields[3], 2)
         self.assertEqual(fields[-1], zlib.crc32(raw[:-4]) & 0xFFFFFFFF)
+
+
+    def test_luton26_live_package_header_uses_family_one(self) -> None:
+        class Bundle:
+            model = "MS220-24P"
+            family = "luton26"
+            manifest_bytes = b"{}"
+            manifest_crc32 = zlib.crc32(manifest_bytes) & 0xFFFFFFFF
+            image_crc32 = 0x12345678
+            image_sha256 = hashlib.sha256(b"image").digest()
+            manifest_sha256 = hashlib.sha256(manifest_bytes).digest()
+
+        image_plan = p3.RepresentationPlan(p3.REP_RAW, 4096, (
+            p3.EncodedFrame(0, 0, 1, 0, b"x", zlib.crc32(b"x") & 0xFFFFFFFF),
+        ))
+        manifest_plan = p3.make_manifest_plan(Bundle.manifest_bytes, 4096)
+        raw = p3.make_live_package_header(
+            Bundle, image_plan, manifest_plan, 1, dry_run=False, force=False
+        )
+        fields = p3.PACKAGE_HEADER.unpack(raw)
+        self.assertEqual(fields[3], 1)
+        self.assertEqual(fields[16].rstrip(b"\0"), b"MS220-24P")
 
     def test_flash_phase_progress_and_success_are_rendered(self) -> None:
         link = FakeLineLink([

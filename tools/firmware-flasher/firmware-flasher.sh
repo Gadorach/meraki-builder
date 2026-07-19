@@ -70,6 +70,7 @@ Options:
   --recovery-path PATH ram-upload (default), embedded, or auto
   --recovery-payload FILE external payload for ram-upload/legacy fallback
   --target-model MODEL  exact hardware model for recovery or live boot
+                        PMOSLIVE: MS22, MS22P, MS220-8/8P/24/24P, MS42, MS42P
   --preflight-scratch N  aligned 64 KiB NOR address (default: 0x00ff0000)
   --manual-target-confirmation  require manual ERASEFLASH challenge entry
   --verbose-acks        print every decoded compact ACK (always retained in logs)
@@ -324,23 +325,30 @@ if live.get("flash_access") != "none":
 if live.get("operations") != ["verify", "dry-run", "liveboot"]:
     raise SystemExit(1)
 payloads = live.get("payloads")
-record = payloads.get("jaguar1") if isinstance(payloads, dict) else None
-if not isinstance(record, dict) or record.get("accepted_models") != ["MS42", "MS42P"]:
+expected = {
+    "luton26": ["MS22", "MS22P", "MS220-8", "MS220-8P", "MS220-24", "MS220-24P"],
+    "jaguar1": ["MS42", "MS42P"],
+}
+if not isinstance(payloads, dict):
     raise SystemExit(1)
-if record.get("linux_handoff") != "mips-legacy-argc-argv-envp-external-initrd-v1":
-    raise SystemExit(1)
-if record.get("platform_identity_handoff") != "kernel-command-line-postmerkos-model-v1":
-    raise SystemExit(1)
+for family, accepted in expected.items():
+    record = payloads.get(family)
+    if not isinstance(record, dict) or record.get("accepted_models") != accepted:
+        raise SystemExit(1)
+    if record.get("linux_handoff") != "mips-legacy-argc-argv-envp-external-initrd-v1":
+        raise SystemExit(1)
+    if record.get("platform_identity_handoff") != "kernel-command-line-postmerkos-model-v1":
+        raise SystemExit(1)
+    if record.get("kernel_boot_argument_contract") != "vcoreiii-standard-mips-argc-argv-envp-fallback-v1":
+        raise SystemExit(1)
+    if record.get("rootfs_handoff") != "squashfs-as-legacy-initrd-v1":
+        raise SystemExit(1)
 if live.get("kernel_boot_argument_contract") != "vcoreiii-standard-mips-argc-argv-envp-fallback-v1":
     raise SystemExit(1)
 kernel_payload = manifest.get("artifact", {}).get("kernel_payload", {})
 if kernel_payload.get("boot_argument_contract") != "vcoreiii-standard-mips-argc-argv-envp-fallback-v1":
     raise SystemExit(1)
 if len(str(kernel_payload.get("build_contract_sha256", ""))) != 64:
-    raise SystemExit(1)
-if record.get("kernel_boot_argument_contract") != "vcoreiii-standard-mips-argc-argv-envp-fallback-v1":
-    raise SystemExit(1)
-if record.get("rootfs_handoff") != "squashfs-as-legacy-initrd-v1":
     raise SystemExit(1)
 PY_LIVE_CAP
 }
@@ -1139,17 +1147,27 @@ run_serial_mode() {
 
 
 run_liveboot_mode() {
-    local default_payload payload_descriptor live_operation args=() log_file rc
+    local default_payload payload_descriptor live_operation args=() log_file rc family
     need python3
     [[ -x $SCRIPT_DIR/serial-runner.py ]] || die 'serial-runner.py helper is missing or not executable'
     [[ -x $SCRIPT_DIR/bootloader-liveboot.py ]] || die 'bootloader-liveboot.py helper is missing or not executable'
     [[ -f $SCRIPT_DIR/bootloader_protocol.py && -f $SCRIPT_DIR/pmosrec_v3.py ]] || \
         die 'PMOSLIVE protocol helpers are missing'
     activate_liveboot
-    [[ -n $TARGET_MODEL ]] || TARGET_MODEL=$(prompt_default 'Exact live-boot target model' 'MS42P')
+    if [[ -z $TARGET_MODEL ]]; then
+        printf '
+Supported PMOSLIVE targets:
+'
+        printf '  Luton26: MS22, MS22P, MS220-8, MS220-8P, MS220-24, MS220-24P
+'
+        printf '  Jaguar1: MS42, MS42P
+'
+        TARGET_MODEL=$(prompt_default 'Exact live-boot target model' 'MS42P')
+    fi
     case $TARGET_MODEL in
-        MS42|MS42P) ;;
-        *) die "PMOSLIVE currently supports MS42 and MS42P only: $TARGET_MODEL" ;;
+        MS22|MS22P|MS220-8|MS220-8P|MS220-24|MS220-24P) family=luton26 ;;
+        MS42|MS42P) family=jaguar1 ;;
+        *) die "PMOSLIVE does not support target model: $TARGET_MODEL" ;;
     esac
     case $OPERATION in
         liveboot-verify) live_operation=verify ;;
@@ -1158,7 +1176,7 @@ run_liveboot_mode() {
         *) die "invalid PMOSLIVE operation: $OPERATION" ;;
     esac
 
-    default_payload="$ARTIFACTS_DIR/liveboot/pmoslive-jaguar1.bin"
+    default_payload="$ARTIFACTS_DIR/liveboot/pmoslive-$family.bin"
     if [[ $LIVEBOOT_PATH == ram-upload || $LIVEBOOT_PATH == auto || -n $LIVEBOOT_PAYLOAD ]]; then
         [[ -n $LIVEBOOT_PAYLOAD ]] || LIVEBOOT_PAYLOAD=$default_payload
         [[ -f $LIVEBOOT_PAYLOAD ]] || die "standalone PMOSLIVE payload not found: $LIVEBOOT_PAYLOAD"
@@ -1187,7 +1205,7 @@ run_liveboot_mode() {
 
     printf '\nPre-kernel PMOSLIVE\n'
     printf 'Operation:         %s\n' "$live_operation"
-    printf 'Target model:      %s (Jaguar1)\n' "$TARGET_MODEL"
+    printf 'Target model:      %s (%s)\n' "$TARGET_MODEL" "$family"
     printf 'Selected firmware: %s\n' "$SELECTED_FIRMWARE"
     printf 'Live-boot path:    %s\n' "$LIVEBOOT_PATH"
     printf 'Flash access:      none (PMOSLIVE contract)\n'

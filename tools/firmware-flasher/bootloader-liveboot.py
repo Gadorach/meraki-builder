@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate or boot a retail MS42/MS42P image entirely from RAM through PMOSLIVE."""
+"""Validate or boot a supported VCore-III retail image entirely from RAM through PMOSLIVE."""
 from __future__ import annotations
 
 import argparse
@@ -14,6 +14,8 @@ import termios
 
 from bootloader_protocol import (
     BOOT_MENU_PREFIX,
+    FAMILY_ID,
+    LIVEBOOT_MODELS,
     MODEL_FAMILY,
     ProtocolError,
     SerialLink,
@@ -29,17 +31,23 @@ from pmosrec_v3 import (
     send_liveboot_v3,
 )
 
-LIVE_MARKER_RE = re.compile(
-    rb"PMOSLIVE3;SOC=jaguar1;FAMILY=2;PROTO=3;FLASH=0;LIVEBOOT=1;"
-    rb"IMAGE_BYTES=16777216;KERNEL=81000000;ROOTFS=87000000;MEM_MIB=120;"
-    rb"FRAME_MAX=4096;WINDOW_MAX=16;SPARSE=1;LZ4=1;END"
-)
-LIVE_READY_RE = re.compile(r"^PMOSLIVE READY 3 SOC=jaguar1 FAMILY=00000002 FLASH=0$")
-LIVE_DESCRIPTOR_RE = re.compile(
-    r"^PMOSLIVE DESCRIPTOR PMOSLIVE3;SOC=jaguar1;FAMILY=2;PROTO=3;FLASH=0;LIVEBOOT=1;"
-    r"IMAGE_BYTES=16777216;KERNEL=81000000;ROOTFS=87000000;MEM_MIB=120;"
-    r"FRAME_MAX=4096;WINDOW_MAX=16;SPARSE=1;LZ4=1;END$"
-)
+def live_marker_bytes(family: str) -> bytes:
+    family_id = FAMILY_ID[family]
+    return (
+        f"PMOSLIVE3;SOC={family};FAMILY={family_id};PROTO=3;FLASH=0;LIVEBOOT=1;"
+        "IMAGE_BYTES=16777216;KERNEL=81000000;ROOTFS=87000000;MEM_MIB=120;"
+        "FRAME_MAX=4096;WINDOW_MAX=16;SPARSE=1;LZ4=1;END"
+    ).encode("ascii")
+
+
+def live_ready_line(family: str) -> str:
+    return f"PMOSLIVE READY 3 SOC={family} FAMILY={FAMILY_ID[family]:08x} FLASH=0"
+
+
+def live_descriptor_line(family: str) -> str:
+    return "PMOSLIVE DESCRIPTOR " + live_marker_bytes(family).decode("ascii")
+
+
 MENU_BYTE_RE = re.compile(r"\bBYTE:\s*0x([0-9a-fA-F]{8})\b")
 MENU_SELECTION_RE = re.compile(r"\bSELECTED:\s*0x([0-9a-fA-F]{8})\b")
 
@@ -88,9 +96,10 @@ def require_hex_field(line: str, pattern: re.Pattern[str], expected: int, label:
         raise ProtocolError(f"{label} reported 0x{observed:08x}; expected 0x{expected:08x}")
 
 
-def inspect_live_payload(path: Path, descriptor_path: Path | None = None) -> LivePayload:
+def inspect_live_payload(path: Path, family: str, descriptor_path: Path | None = None) -> LivePayload:
     data = path.read_bytes()
-    if len(LIVE_MARKER_RE.findall(data)) != 1:
+    marker = live_marker_bytes(family)
+    if data.count(marker) != 1:
         raise ProtocolError("PMOSLIVE payload must contain exactly one valid flash-disabled descriptor")
     if any(marker in data for marker in (b"ERASEFLASH", b"FLASH-PREFLIGHT", b"PROGRESS ERASE", b"PROGRESS PROGRAM")):
         raise ProtocolError("PMOSLIVE payload contains a forbidden flash-write marker")
@@ -106,8 +115,10 @@ def inspect_live_payload(path: Path, descriptor_path: Path | None = None) -> Liv
     binary = metadata.get("binary", {})
     if metadata.get("format") != "postmerkos.uart-liveboot-payload.v1":
         raise ProtocolError("unsupported PMOSLIVE descriptor format")
-    if metadata.get("soc_family") != "jaguar1" or metadata.get("soc_family_id") != 2:
-        raise ProtocolError("PMOSLIVE descriptor is not for Jaguar1")
+    if metadata.get("soc_family") != family or metadata.get("soc_family_id") != FAMILY_ID[family]:
+        raise ProtocolError(f"PMOSLIVE descriptor is not for {family}")
+    if metadata.get("accepted_models") != LIVEBOOT_MODELS[family]:
+        raise ProtocolError("PMOSLIVE descriptor model allow-list is incompatible")
     if metadata.get("flash_access") != "none":
         raise ProtocolError("PMOSLIVE descriptor does not prohibit flash access")
     if metadata.get("load_address") != 0x86C00000 or metadata.get("entry_address") != 0x86C00000:
@@ -117,11 +128,11 @@ def inspect_live_payload(path: Path, descriptor_path: Path | None = None) -> Liv
     return LivePayload(path, len(data), digest, 0x86C00000, 0x86C00000)
 
 
-def accept_live_ready(link: SerialLink, ready_line: str) -> None:
-    if not LIVE_READY_RE.fullmatch(ready_line):
+def accept_live_ready(link: SerialLink, ready_line: str, family: str) -> None:
+    if ready_line != live_ready_line(family):
         raise ProtocolError(f"invalid PMOSLIVE ready line: {ready_line}")
     descriptor = link.wait_for(("PMOSLIVE DESCRIPTOR ",), 5.0)
-    if not LIVE_DESCRIPTOR_RE.fullmatch(descriptor):
+    if descriptor != live_descriptor_line(family):
         raise ProtocolError(f"invalid PMOSLIVE descriptor line: {descriptor}")
     link.wait_for(("PMOSLIVE RAM-MAP ",), 5.0)
     link.wait_for(("PMOSLIVE UART-CAP ",), 5.0)
@@ -130,11 +141,12 @@ def accept_live_ready(link: SerialLink, ready_line: str) -> None:
 
 def enter_liveboot(link: SerialLink, path: str, timeout: float,
                    payload: LivePayload | None, chunk_size: int,
-                   frame_retries: int, ack_timeout: float) -> str:
+                   frame_retries: int, ack_timeout: float,
+                   family: str = "jaguar1") -> str:
     line = link.wait_for(("PMOSBOOT MENU-PROBE", "PMOSLIVE READY 3", "PMOSRAM READY 2"), timeout)
     selected_path = path
     if line.startswith("PMOSLIVE READY 3"):
-        accept_live_ready(link, line)
+        accept_live_ready(link, line, family)
         return "already-running"
     if line.startswith("PMOSBOOT MENU-PROBE"):
         link.write_all(b"\r")
@@ -180,7 +192,7 @@ def enter_liveboot(link: SerialLink, path: str, timeout: float,
             chunk_size, frame_retries, ack_timeout,
         )
         line = link.wait_for(("PMOSLIVE READY 3",), 10.0)
-    accept_live_ready(link, line)
+    accept_live_ready(link, line, family)
     return selected_path
 
 
@@ -194,7 +206,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--payload-descriptor", type=Path)
     parser.add_argument("--firmware", type=Path, required=True)
     parser.add_argument("--manifest", type=Path)
-    parser.add_argument("--target-model", choices=("MS42", "MS42P"), default="MS42P")
+    parser.add_argument("--target-model", choices=tuple(model for family in LIVEBOOT_MODELS.values() for model in family), default="MS42P")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--manual-target-confirmation", action="store_true")
     parser.add_argument("--chunk-size", type=int, default=1024)
@@ -220,10 +232,11 @@ def main(argv: list[str] | None = None) -> int:
         args.firmware, manifest, args.target_model,
         force=args.force or args.operation != "boot", require_liveboot=True,
     )
-    if MODEL_FAMILY[args.target_model] != "jaguar1":
-        raise ProtocolError("PMOSLIVE currently supports Jaguar1 only")
+    family = MODEL_FAMILY[args.target_model]
+    if family not in LIVEBOOT_MODELS or args.target_model not in LIVEBOOT_MODELS[family]:
+        raise ProtocolError(f"PMOSLIVE does not support {args.target_model}")
 
-    payload = inspect_live_payload(args.payload, args.payload_descriptor) if args.payload else None
+    payload = inspect_live_payload(args.payload, family, args.payload_descriptor) if args.payload else None
     if payload is not None:
         validate_live_payload_binding(payload.size, payload.sha256, bundle)
     if args.liveboot_path == "ram-upload" and payload is None:
@@ -249,7 +262,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             selected = enter_liveboot(
                 link, args.liveboot_path, args.ready_timeout, payload,
-                args.chunk_size, args.frame_retries, args.ack_timeout,
+                args.chunk_size, args.frame_retries, args.ack_timeout, family=family,
             )
         except ProtocolError as exc:
             if args.liveboot_path != "auto" or payload is None:
@@ -263,7 +276,7 @@ def main(argv: list[str] | None = None) -> int:
             link.buffer.clear()
             selected = enter_liveboot(
                 link, "ram-upload", args.ready_timeout, payload,
-                args.chunk_size, args.frame_retries, args.ack_timeout,
+                args.chunk_size, args.frame_retries, args.ack_timeout, family=family,
             )
         print(f"PMOSLIVE ready through {selected}", flush=True)
         baud = args.baud if args.skip_baud_negotiation else negotiate_fastest_baud(
