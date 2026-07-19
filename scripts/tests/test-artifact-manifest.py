@@ -49,9 +49,15 @@ class ArtifactManifestTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.recovery = self.root / "recovery"
         self.recovery.mkdir()
+        self.liveboot = self.root / "liveboot"
+        self.liveboot.mkdir()
 
         image = bytearray(b"\xff" * TOTAL_BYTES)
-        markers = (b"PMOSRAM READY 2", b"PMOSBOOT MENU-PROBE", b"PMOSBOOT MENU 1=UART-RAMLOADER 2=FW-RECOVERY")
+        markers = (
+            b"PMOSRAM READY 2",
+            b"PMOSBOOT MENU-PROBE",
+            b"PMOSBOOT MENU 1=UART-RAMLOADER 2=FW-RECOVERY 3=LIVEBOOT",
+        )
         cursor = 0x100
         for marker in markers:
             image[cursor:cursor + len(marker)] = marker
@@ -89,7 +95,7 @@ class ArtifactManifestTests(unittest.TestCase):
             digest = hashlib.sha256(payload.read_bytes()).hexdigest()
             embedded[family] = {
                 "path": str(payload), "size": payload.stat().st_size, "sha256": digest,
-                "load_address": 0x81000000, "entry_address": 0x81000000,
+                "load_address": 0x86C00000, "entry_address": 0x86C00000,
                 "entry_contract": "flat-binary-byte-zero-v1",
                 "manifest_lookup_contract": "direct-object-members-v1",
                 "hardware_preflight_contract": "spi-nor-scratch-rw-restore-loader-crc-v4",
@@ -109,8 +115,8 @@ class ArtifactManifestTests(unittest.TestCase):
                 "operations": ["verify", "preflight", "dry-run", "flash"],
                 "transport_integrity": ["frame-crc32", "compact-ack-crc32", "object-crc32", "object-sha256", "reconstructed-image-sha256"],
                 "adaptive_transport_contract": "pmosrec-v3-adaptive-uart-sparse-lz4-v1",
-                "load_address": 0x81000000,
-                "entry_address": 0x81000000,
+                "load_address": 0x86C00000,
+                "entry_address": 0x86C00000,
                 "entry_contract": "flat-binary-byte-zero-v1",
                 "manifest_lookup_contract": "direct-object-members-v1",
                 "hardware_preflight_contract": "spi-nor-scratch-rw-restore-loader-crc-v4",
@@ -130,6 +136,56 @@ class ArtifactManifestTests(unittest.TestCase):
             (self.recovery / f"recovery-{family}.descriptor.json").write_text(
                 json.dumps(descriptor, indent=2, sort_keys=True) + "\n"
             )
+
+        live_marker = (
+            b"PMOSLIVE3;SOC=jaguar1;FAMILY=2;PROTO=3;FLASH=0;LIVEBOOT=1;"
+            b"IMAGE_BYTES=16777216;KERNEL=81000000;ROOTFS=87000000;MEM_MIB=120;"
+            b"FRAME_MAX=4096;WINDOW_MAX=16;SPARSE=1;LZ4=1;END"
+        )
+        self.live_payload = self.liveboot / "pmoslive-jaguar1.bin"
+        self.live_payload.write_bytes(b"live-prefix\0" + live_marker + b"\0live-suffix")
+        live_digest = hashlib.sha256(self.live_payload.read_bytes()).hexdigest()
+        live_ram = {
+            "kernel_load_address": 0x81000000,
+            "image_staging_address": 0x81400000,
+            "manifest_address": 0x82400000,
+            "payload_address": 0x86C00000,
+            "squashfs_address": 0x87000000,
+            "boot_params_physical_address": 0x00000400,
+            "boot_params_uncached_address": 0xA0000400,
+            "boot_params_bytes": 0x00000C00,
+            "linux_memory_mib": 120,
+            "top_reserved_mib": 8,
+        }
+        live_descriptor = {
+            "format": "postmerkos.uart-liveboot-payload.v1",
+            "protocol_version": 3,
+            "soc_family": "jaguar1",
+            "soc_family_id": 2,
+            "accepted_models": ["MS42", "MS42P"],
+            "operations": ["verify", "dry-run", "liveboot"],
+            "flash_access": "none",
+            "load_address": 0x86C00000,
+            "entry_address": 0x86C00000,
+            "entry_contract": "flat-binary-byte-zero-v1",
+            "transport_contract": "pmosrec-v3-adaptive-uart-sparse-lz4-v1",
+            "image": {
+                "bytes": TOTAL_BYTES,
+                "kernel_offset": KERNEL_OFFSET,
+                "squashfs_offset": ROOTFS_OFFSET,
+            },
+            "ram_layout": live_ram,
+            "linux_handoff": "mips-legacy-argc-argv-envp-external-initrd-v1",
+            "rootfs_handoff": "squashfs-as-legacy-initrd-v1",
+            "binary": {
+                "filename": self.live_payload.name,
+                "bytes": self.live_payload.stat().st_size,
+                "sha256": live_digest,
+            },
+        }
+        (self.liveboot / "pmoslive-jaguar1.descriptor.json").write_text(
+            json.dumps(live_descriptor, indent=2, sort_keys=True) + "\n"
+        )
 
         loader_sha = hashlib.sha256(image[:LOADER_BYTES]).hexdigest()
         self.loader_manifest = self.root / "loader.manifest.json"
@@ -155,11 +211,39 @@ class ArtifactManifestTests(unittest.TestCase):
                 "transport_integrity": ["frame-crc32", "object-crc32", "object-sha256"],
                 "boot_menu": {
                     "probe_timeout_ms": 3000, "selection_timeout_ms": 5000,
-                    "options": {"1": "uart-ramloader", "2": "embedded-firmware-recovery"},
+                    "options": {
+                        "1": "uart-ramloader",
+                        "2": "embedded-firmware-recovery",
+                        "3": "embedded-liveboot",
+                    },
                     "noise_behavior": "invalid/no explicit option continues normal boot",
                 },
                 "image_check_diagnostics": "structured-pass-warn-fail-skip-values-v1",
+                "stage1_flash_offset": 0x00020000,
+                "stage1_storage_contract": "single-shared-boot-region-blob-v1",
                 "embedded_recovery": embedded,
+                "embedded_liveboot": {
+                    "jaguar1": {
+                        "path": str(self.live_payload),
+                        "size": self.live_payload.stat().st_size,
+                        "sha256": live_digest,
+                        "load_address": 0x86C00000,
+                        "entry_address": 0x86C00000,
+                        "entry_contract": "flat-binary-byte-zero-v1",
+                        "flash_access": "none",
+                        "accepted_models": ["MS42", "MS42P"],
+                        "transport_contract": "pmosrec-v3-adaptive-uart-sparse-lz4-v1",
+                        "linux_handoff": "mips-legacy-argc-argv-envp-external-initrd-v1",
+                        "rootfs_handoff": "squashfs-as-legacy-initrd-v1",
+                        "kernel_load_address": 0x81000000,
+                        "squashfs_address": 0x87000000,
+                        "boot_params_physical_address": 0x00000400,
+                        "boot_params_uncached_address": 0xA0000400,
+                        "boot_params_bytes": 0x00000C00,
+                        "linux_memory_mib": 120,
+                        "top_reserved_mib": 8,
+                    },
+                },
             },
         }, indent=2) + "\n")
         self.loader_version = self.root / "loader.version"
@@ -175,6 +259,7 @@ class ArtifactManifestTests(unittest.TestCase):
             [
                 sys.executable, str(SCRIPT), str(self.source), str(self.output),
                 str(self.image), str(self.rootfs), str(self.loader_manifest), str(self.recovery),
+                str(self.liveboot),
                 str(self.loader_version), str(self.loader_revision),
             ],
             text=True,
@@ -196,6 +281,9 @@ class ArtifactManifestTests(unittest.TestCase):
         self.assertEqual(loader["protocol_version"], 2)
         self.assertEqual(loader["build_manifest_format"], "postmerkos.vcoreiii-linuxloader-build.v7")
         self.assertEqual(loader["boot_menu"]["options"]["2"], "embedded-firmware-recovery")
+        self.assertEqual(loader["boot_menu"]["options"]["3"], "embedded-liveboot")
+        self.assertEqual(loader["stage1_flash_offset"], 0x00020000)
+        self.assertEqual(loader["stage1_storage_contract"], "single-shared-boot-region-blob-v1")
         self.assertEqual(manifest["artifact"]["bootloader"]["version"], "0.7.0")
         self.assertEqual(manifest["artifact"]["kernel_payload"]["alignment_bytes"], 32)
         firmware = manifest["recovery"]["uart_firmware"]
@@ -212,14 +300,28 @@ class ArtifactManifestTests(unittest.TestCase):
             self.assertEqual(record["accepted_models"], target["models"])
             self.assertEqual(record["soc_family_id"], target["id"])
             self.assertEqual(record["spi_software_mode_address"], target["spi"])
-            self.assertEqual(record["load_address"], 0x81000000)
-            self.assertEqual(record["entry_address"], 0x81000000)
+            self.assertEqual(record["load_address"], 0x86C00000)
+            self.assertEqual(record["entry_address"], 0x86C00000)
             self.assertEqual(record["entry_contract"], "flat-binary-byte-zero-v1")
             self.assertEqual(record["manifest_lookup_contract"], "direct-object-members-v1")
             self.assertEqual(record["hardware_preflight_contract"], "spi-nor-scratch-rw-restore-loader-crc-v4")
             self.assertEqual(record["spi_master_enable_contract"], "preserve-general-ctrl-enable-spi-v1")
             self.assertEqual(record["adaptive_transport_contract"], "pmosrec-v3-adaptive-uart-sparse-lz4-v1")
             self.assertTrue(record["preflight_scratch"]["restore_original"])
+        live = manifest["recovery"]["uart_liveboot"]
+        self.assertEqual(live["flash_access"], "none")
+        self.assertEqual(live["operations"], ["verify", "dry-run", "liveboot"])
+        live_record = live["payloads"]["jaguar1"]
+        self.assertEqual(live_record["load_address"], 0x86C00000)
+        self.assertEqual(live_record["ram_layout"]["squashfs_address"], 0x87000000)
+        embedded_live = loader["embedded_liveboot"]["jaguar1"]
+        self.assertEqual(embedded_live["kernel_load_address"], 0x81000000)
+        self.assertEqual(embedded_live["squashfs_address"], 0x87000000)
+        self.assertEqual(embedded_live["boot_params_physical_address"], 0x00000400)
+        self.assertEqual(embedded_live["boot_params_uncached_address"], 0xA0000400)
+        self.assertEqual(embedded_live["boot_params_bytes"], 0x00000C00)
+        self.assertEqual(embedded_live["linux_memory_mib"], 120)
+        self.assertEqual(embedded_live["top_reserved_mib"], 8)
 
     def test_tampered_payload_is_rejected(self) -> None:
         payload = self.recovery / "recovery-jaguar1.bin"

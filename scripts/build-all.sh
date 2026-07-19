@@ -69,10 +69,10 @@ if [[ ! -f "$LOADER_ARTIFACT" || ! -f "$LOADER_MANIFEST" || ! -f "$LOADER_BUILD_
   "$SCRIPT_DIR/build-loader.sh"
 else
   if ! python3 - "$LOADER_ARTIFACT" "$LOADER_MANIFEST" "$LOADER_BUILD_SOURCE_RECORD" \
-      "$LOADER_SOURCE_REVISION_FILE" "$RECOVERY_ARTIFACT_DIR" <<'PY_LOADER'
+      "$LOADER_SOURCE_REVISION_FILE" "$RECOVERY_ARTIFACT_DIR" "$LIVEBOOT_ARTIFACT_DIR" <<'PY_LOADER'
 import hashlib, json, sys
 from pathlib import Path
-image, manifest_path, source_record_path, selected_revision_path, recovery_dir = map(Path, sys.argv[1:])
+image, manifest_path, source_record_path, selected_revision_path, recovery_dir, liveboot_dir = map(Path, sys.argv[1:])
 data = image.read_bytes()
 manifest = json.loads(manifest_path.read_text())
 source_record = json.loads(source_record_path.read_text())
@@ -80,12 +80,14 @@ selected_revision = selected_revision_path.read_text().strip()
 cap = manifest.get("uart_ramloader", {})
 policies = manifest.get("policies", {})
 assert len(data) == 0x40000
-for marker in (b"PMOSRAM READY 2", b"PMOSBOOT MENU-PROBE", b"PMOSBOOT MENU 1=UART-RAMLOADER 2=FW-RECOVERY"):
+for marker in (b"PMOSRAM READY 2", b"PMOSBOOT MENU-PROBE", b"PMOSBOOT MENU 1=UART-RAMLOADER 2=FW-RECOVERY 3=LIVEBOOT"):
     assert marker in data
 assert manifest.get("format") == "postmerkos.vcoreiii-linuxloader-build.v7"
 assert cap.get("enabled") is True and cap.get("protocol_version") == 2
-assert cap.get("boot_menu", {}).get("options") == {"1": "uart-ramloader", "2": "embedded-firmware-recovery"}
+assert cap.get("boot_menu", {}).get("options") == {"1": "uart-ramloader", "2": "embedded-firmware-recovery", "3": "embedded-liveboot"}
 assert cap.get("image_check_diagnostics") == "structured-pass-warn-fail-skip-values-v1"
+assert cap.get("stage1_flash_offset") == 0x00020000
+assert cap.get("stage1_storage_contract") == "single-shared-boot-region-blob-v1"
 assert policies.get("payload_slot_end") == 0x300000 and policies.get("hard_payload_limit") == 0x2BFFE0
 assert manifest.get("boot_region", {}).get("sha256") == hashlib.sha256(data).hexdigest()
 assert source_record.get("project") == "Gadorach/meraki-redboot"
@@ -97,8 +99,8 @@ for family in ("luton26", "jaguar1"):
     assert payload.is_file() and descriptor_path.is_file()
     raw = payload.read_bytes()
     descriptor = json.loads(descriptor_path.read_text())
-    assert descriptor.get("load_address") == 0x81000000
-    assert descriptor.get("entry_address") == 0x81000000
+    assert descriptor.get("load_address") == 0x86C00000
+    assert descriptor.get("entry_address") == 0x86C00000
     assert descriptor.get("entry_contract") == "flat-binary-byte-zero-v1"
     assert descriptor.get("manifest_lookup_contract") == "direct-object-members-v1"
     assert descriptor.get("hardware_preflight_contract") == "spi-nor-scratch-rw-restore-loader-crc-v4"
@@ -115,19 +117,60 @@ for family in ("luton26", "jaguar1"):
     record = embedded.get(family, {})
     assert record.get("size") == len(raw)
     assert str(record.get("sha256", "")).lower() == digest
-    assert record.get("load_address") == 0x81000000
-    assert record.get("entry_address") == 0x81000000
+    assert record.get("load_address") == 0x86C00000
+    assert record.get("entry_address") == 0x86C00000
     assert record.get("entry_contract") == "flat-binary-byte-zero-v1"
     assert record.get("manifest_lookup_contract") == "direct-object-members-v1"
     assert record.get("hardware_preflight_contract") == "spi-nor-scratch-rw-restore-loader-crc-v4"
     assert record.get("spi_master_enable_contract") == "preserve-general-ctrl-enable-spi-v1"
     assert record.get("adaptive_transport_contract") == "pmosrec-v3-adaptive-uart-sparse-lz4-v1"
+
+live_payload = liveboot_dir / "pmoslive-jaguar1.bin"
+live_descriptor_path = liveboot_dir / "pmoslive-jaguar1.descriptor.json"
+assert live_payload.is_file() and live_descriptor_path.is_file()
+live_raw = live_payload.read_bytes()
+live_descriptor = json.loads(live_descriptor_path.read_text())
+assert live_descriptor.get("format") == "postmerkos.uart-liveboot-payload.v1"
+assert live_descriptor.get("protocol_version") == 3
+assert live_descriptor.get("flash_access") == "none"
+assert live_descriptor.get("load_address") == 0x86C00000
+assert live_descriptor.get("entry_address") == 0x86C00000
+assert live_descriptor.get("ram_layout") == {
+    "kernel_load_address": 0x81000000,
+    "image_staging_address": 0x81400000,
+    "manifest_address": 0x82400000,
+    "payload_address": 0x86C00000,
+    "squashfs_address": 0x87000000,
+    "boot_params_physical_address": 0x00000400,
+    "boot_params_uncached_address": 0xA0000400,
+    "boot_params_bytes": 0x00000C00,
+    "linux_memory_mib": 120,
+    "top_reserved_mib": 8,
+}
+live_binary = live_descriptor.get("binary", {})
+live_digest = hashlib.sha256(live_raw).hexdigest()
+assert live_binary.get("filename") == live_payload.name
+assert live_binary.get("bytes") == len(live_raw)
+assert str(live_binary.get("sha256", "")).lower() == live_digest
+live_record = cap.get("embedded_liveboot", {}).get("jaguar1", {})
+assert live_record.get("size") == len(live_raw)
+assert str(live_record.get("sha256", "")).lower() == live_digest
+assert live_record.get("load_address") == 0x86C00000
+assert live_record.get("entry_address") == 0x86C00000
+assert live_record.get("flash_access") == "none"
+assert live_record.get("kernel_load_address") == 0x81000000
+assert live_record.get("squashfs_address") == 0x87000000
+assert live_record.get("boot_params_physical_address") == 0x00000400
+assert live_record.get("boot_params_uncached_address") == 0xA0000400
+assert live_record.get("boot_params_bytes") == 0x00000C00
+assert live_record.get("linux_memory_mib") == 120
+assert live_record.get("top_reserved_mib") == 8
 PY_LOADER
   then
     warn "The cached loader does not match the selected meraki-redboot source release; rebuilding it."
     "$SCRIPT_DIR/build-loader.sh"
   else
-    log "Reusing validated source-built meraki-redboot and embedded recovery payloads"
+    log "Reusing validated source-built meraki-redboot, recovery payloads, and PMOSLIVE"
   fi
 fi
 

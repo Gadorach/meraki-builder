@@ -29,16 +29,17 @@ def sha256(path: Path) -> str:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) not in (7, 9):
+    if len(argv) not in (8, 10):
         print(
             "usage: write-artifact-manifest.py INPUT.json OUTPUT.json IMAGE ROOTFS "
-            "LOADER-MANIFEST.json RECOVERY-ARTIFACT-DIR [LOADER-VERSION LOADER-REVISION]",
+            "LOADER-MANIFEST.json RECOVERY-ARTIFACT-DIR LIVEBOOT-ARTIFACT-DIR "
+            "[LOADER-VERSION LOADER-REVISION]",
             file=sys.stderr,
         )
         return 2
-    source, output, image, rootfs, loader_manifest_path, recovery_dir = map(Path, argv[1:7])
-    loader_version_path = Path(argv[7]) if len(argv) == 9 else None
-    loader_revision_path = Path(argv[8]) if len(argv) == 9 else None
+    source, output, image, rootfs, loader_manifest_path, recovery_dir, liveboot_dir = map(Path, argv[1:8])
+    loader_version_path = Path(argv[8]) if len(argv) == 10 else None
+    loader_revision_path = Path(argv[9]) if len(argv) == 10 else None
     manifest = json.loads(source.read_text(encoding="utf-8"))
     loader_manifest = json.loads(loader_manifest_path.read_text(encoding="utf-8"))
     if not isinstance(manifest, dict) or not isinstance(loader_manifest, dict):
@@ -62,7 +63,7 @@ def main(argv: list[str]) -> int:
     loader_digest = hashlib.sha256(loader_data).hexdigest()
     if loader_record.get("sha256") != loader_digest:
         raise SystemExit("published image loader region does not match the source-built loader manifest")
-    for marker in (b"PMOSRAM READY 2", b"PMOSBOOT MENU-PROBE", b"PMOSBOOT MENU 1=UART-RAMLOADER 2=FW-RECOVERY"):
+    for marker in (b"PMOSRAM READY 2", b"PMOSBOOT MENU-PROBE", b"PMOSBOOT MENU 1=UART-RAMLOADER 2=FW-RECOVERY 3=LIVEBOOT"):
         if marker not in loader_data:
             raise SystemExit(f"published image loader region is missing meraki-redboot capability marker {marker!r}")
     if image_data[LOADER_BYTES:LOADER_BYTES + 4] != b"SPIM":
@@ -93,11 +94,13 @@ def main(argv: list[str]) -> int:
     policies = loader_manifest.get("policies", {})
     if policies.get("payload_slot_end") != 0x300000 or policies.get("hard_payload_limit") != 0x2BFFE0:
         raise SystemExit("loader manifest is not built for the postmerkOS kernel slot")
-    expected_menu = {"1": "uart-ramloader", "2": "embedded-firmware-recovery"}
+    expected_menu = {"1": "uart-ramloader", "2": "embedded-firmware-recovery", "3": "embedded-liveboot"}
     if uart.get("boot_menu", {}).get("options") != expected_menu:
         raise SystemExit("loader manifest does not declare the meraki-redboot v0.7 boot menu")
     if uart.get("image_check_diagnostics") != "structured-pass-warn-fail-skip-values-v1":
         raise SystemExit("loader manifest does not declare structured image diagnostics")
+    if uart.get("stage1_flash_offset") != 0x00020000 or uart.get("stage1_storage_contract") != "single-shared-boot-region-blob-v1":
+        raise SystemExit("loader manifest does not declare the shared stage-1 boot-region contract")
     embedded_source = uart.get("embedded_recovery")
     if not isinstance(embedded_source, dict):
         raise SystemExit("loader manifest does not bind embedded platform recovery payloads")
@@ -146,8 +149,8 @@ def main(argv: list[str]) -> int:
             raise SystemExit(f"recovery descriptor flash geometry mismatch: {descriptor_path}")
         if descriptor.get("operations") != ["verify", "preflight", "dry-run", "flash"]:
             raise SystemExit(f"recovery descriptor operation contract mismatch: {descriptor_path}")
-        if descriptor.get("load_address") != 0x81000000 or descriptor.get("entry_address") != 0x81000000:
-            raise SystemExit(f"recovery descriptor load/entry address mismatch: {descriptor_path}")
+        if descriptor.get("load_address") != 0x86C00000 or descriptor.get("entry_address") != 0x86C00000:
+            raise SystemExit(f"recovery descriptor high-memory load/entry address mismatch: {descriptor_path}")
         if descriptor.get("entry_contract") != "flat-binary-byte-zero-v1":
             raise SystemExit(f"recovery descriptor lacks corrected byte-zero entry contract: {descriptor_path}")
         if descriptor.get("manifest_lookup_contract") != "direct-object-members-v1":
@@ -196,8 +199,8 @@ def main(argv: list[str]) -> int:
             raise SystemExit(f"loader manifest has no embedded recovery record for {family}")
         if embedded_record.get("size") != len(payload_data) or str(embedded_record.get("sha256", "")).lower() != digest:
             raise SystemExit(f"loader embedded recovery binding does not match {binary_path.name}")
-        if embedded_record.get("load_address") != 0x81000000 or embedded_record.get("entry_address") != 0x81000000:
-            raise SystemExit(f"loader embedded recovery load/entry address mismatch: {binary_path.name}")
+        if embedded_record.get("load_address") != 0x86C00000 or embedded_record.get("entry_address") != 0x86C00000:
+            raise SystemExit(f"loader embedded recovery high-memory load/entry address mismatch: {binary_path.name}")
         if embedded_record.get("entry_contract") != "flat-binary-byte-zero-v1":
             raise SystemExit(f"loader embedded recovery lacks corrected byte-zero entry contract: {binary_path.name}")
         if embedded_record.get("manifest_lookup_contract") != "direct-object-members-v1":
@@ -231,6 +234,102 @@ def main(argv: list[str]) -> int:
             "preflight_scratch": descriptor["preflight_scratch"],
         }
 
+    live_descriptor_path = liveboot_dir / "pmoslive-jaguar1.descriptor.json"
+    if not live_descriptor_path.is_file():
+        raise SystemExit(f"PMOSLIVE descriptor is missing: {live_descriptor_path}")
+    live_descriptor = json.loads(live_descriptor_path.read_text(encoding="utf-8"))
+    live_binary_record = live_descriptor.get("binary", {})
+    live_binary_path = liveboot_dir / str(live_binary_record.get("filename", ""))
+    if not live_binary_path.is_file():
+        raise SystemExit(f"PMOSLIVE binary is missing: {live_binary_path}")
+    live_data = live_binary_path.read_bytes()
+    live_digest = hashlib.sha256(live_data).hexdigest()
+    live_marker = (
+        b"PMOSLIVE3;SOC=jaguar1;FAMILY=2;PROTO=3;FLASH=0;LIVEBOOT=1;"
+        b"IMAGE_BYTES=16777216;KERNEL=81000000;ROOTFS=87000000;MEM_MIB=120;"
+        b"FRAME_MAX=4096;WINDOW_MAX=16;SPARSE=1;LZ4=1;END"
+    )
+    if live_data.count(live_marker) != 1:
+        raise SystemExit("PMOSLIVE embedded target descriptor mismatch")
+    if any(marker in live_data for marker in (b"ERASEFLASH", b"FLASH-PREFLIGHT", b"PROGRESS ERASE", b"PROGRESS PROGRAM")):
+        raise SystemExit("PMOSLIVE unexpectedly contains flash-write markers")
+    if live_descriptor.get("format") != "postmerkos.uart-liveboot-payload.v1" or live_descriptor.get("protocol_version") != 3:
+        raise SystemExit("PMOSLIVE descriptor format/protocol mismatch")
+    if live_descriptor.get("soc_family") != "jaguar1" or live_descriptor.get("soc_family_id") != 2:
+        raise SystemExit("PMOSLIVE descriptor family mismatch")
+    if live_descriptor.get("accepted_models") != ["MS42", "MS42P"]:
+        raise SystemExit("PMOSLIVE descriptor model allow-list mismatch")
+    if live_descriptor.get("operations") != ["verify", "dry-run", "liveboot"] or live_descriptor.get("flash_access") != "none":
+        raise SystemExit("PMOSLIVE descriptor operation/flash contract mismatch")
+    if live_descriptor.get("load_address") != 0x86C00000 or live_descriptor.get("entry_address") != 0x86C00000:
+        raise SystemExit("PMOSLIVE descriptor high-memory load/entry mismatch")
+    if live_descriptor.get("entry_contract") != "flat-binary-byte-zero-v1":
+        raise SystemExit("PMOSLIVE descriptor entry contract mismatch")
+    if live_descriptor.get("transport_contract") != "pmosrec-v3-adaptive-uart-sparse-lz4-v1":
+        raise SystemExit("PMOSLIVE descriptor transport contract mismatch")
+    if live_descriptor.get("linux_handoff") != "mips-legacy-argc-argv-envp-external-initrd-v1":
+        raise SystemExit("PMOSLIVE descriptor Linux handoff mismatch")
+    if live_descriptor.get("rootfs_handoff") != "squashfs-as-legacy-initrd-v1":
+        raise SystemExit("PMOSLIVE descriptor rootfs handoff mismatch")
+    live_image = live_descriptor.get("image", {})
+    if live_image != {"bytes": TOTAL_BYTES, "kernel_offset": LOADER_BYTES, "squashfs_offset": LOADER_BYTES + KERNEL_BYTES}:
+        raise SystemExit("PMOSLIVE descriptor image geometry mismatch")
+    live_ram = live_descriptor.get("ram_layout", {})
+    expected_live_ram = {
+        "kernel_load_address": 0x81000000,
+        "image_staging_address": 0x81400000,
+        "manifest_address": 0x82400000,
+        "payload_address": 0x86C00000,
+        "squashfs_address": 0x87000000,
+        "boot_params_physical_address": 0x00000400,
+        "boot_params_uncached_address": 0xA0000400,
+        "boot_params_bytes": 0x00000C00,
+        "linux_memory_mib": 120,
+        "top_reserved_mib": 8,
+    }
+    if live_ram != expected_live_ram:
+        raise SystemExit("PMOSLIVE descriptor RAM layout mismatch")
+    if live_binary_record.get("bytes") != len(live_data) or str(live_binary_record.get("sha256", "")).lower() != live_digest:
+        raise SystemExit("PMOSLIVE descriptor binary record mismatch")
+    embedded_live_source = uart.get("embedded_liveboot", {}).get("jaguar1", {})
+    if embedded_live_source.get("size") != len(live_data) or str(embedded_live_source.get("sha256", "")).lower() != live_digest:
+        raise SystemExit("loader embedded PMOSLIVE binding does not match the standalone payload")
+    expected_embedded_live = {
+        "load_address": 0x86C00000,
+        "entry_address": 0x86C00000,
+        "entry_contract": "flat-binary-byte-zero-v1",
+        "flash_access": "none",
+        "accepted_models": ["MS42", "MS42P"],
+        "transport_contract": "pmosrec-v3-adaptive-uart-sparse-lz4-v1",
+        "linux_handoff": "mips-legacy-argc-argv-envp-external-initrd-v1",
+        "rootfs_handoff": "squashfs-as-legacy-initrd-v1",
+        "kernel_load_address": 0x81000000,
+        "squashfs_address": 0x87000000,
+        "boot_params_physical_address": 0x00000400,
+        "boot_params_uncached_address": 0xA0000400,
+        "boot_params_bytes": 0x00000C00,
+        "linux_memory_mib": 120,
+        "top_reserved_mib": 8,
+    }
+    for key, value in expected_embedded_live.items():
+        if embedded_live_source.get(key) != value:
+            raise SystemExit(f"loader embedded PMOSLIVE {key} mismatch")
+    live_payload = {
+        "filename": live_binary_path.name,
+        "bytes": len(live_data),
+        "sha256": live_digest,
+        "soc_family_id": 2,
+        "accepted_models": ["MS42", "MS42P"],
+        "load_address": 0x86C00000,
+        "entry_address": 0x86C00000,
+        "entry_contract": "flat-binary-byte-zero-v1",
+        "flash_access": "none",
+        "transport_contract": "pmosrec-v3-adaptive-uart-sparse-lz4-v1",
+        "linux_handoff": "mips-legacy-argc-argv-envp-external-initrd-v1",
+        "rootfs_handoff": "squashfs-as-legacy-initrd-v1",
+        "ram_layout": expected_live_ram,
+    }
+
     manifest["recovery"] = {
         "uart_ramloader": {
             "enabled": True,
@@ -249,6 +348,8 @@ def main(argv: list[str]) -> int:
             "transport_integrity": list(uart["transport_integrity"]),
             "boot_menu": uart["boot_menu"],
             "image_check_diagnostics": uart["image_check_diagnostics"],
+            "stage1_flash_offset": int(uart["stage1_flash_offset"]),
+            "stage1_storage_contract": uart["stage1_storage_contract"],
             "embedded_recovery": {
                 family: {
                     "bytes": recovery_payloads[family]["bytes"],
@@ -262,6 +363,16 @@ def main(argv: list[str]) -> int:
                     "adaptive_transport_contract": recovery_payloads[family]["adaptive_transport_contract"],
                 } for family in ("luton26", "jaguar1")
             },
+            "embedded_liveboot": {"jaguar1": {
+                **dict(live_payload),
+                "kernel_load_address": expected_live_ram["kernel_load_address"],
+                "squashfs_address": expected_live_ram["squashfs_address"],
+                "boot_params_physical_address": expected_live_ram["boot_params_physical_address"],
+                "boot_params_uncached_address": expected_live_ram["boot_params_uncached_address"],
+                "boot_params_bytes": expected_live_ram["boot_params_bytes"],
+                "linux_memory_mib": expected_live_ram["linux_memory_mib"],
+                "top_reserved_mib": expected_live_ram["top_reserved_mib"],
+            }},
             "loader_sha256": loader_digest,
         },
         "uart_firmware": {
@@ -293,6 +404,20 @@ def main(argv: list[str]) -> int:
             "delivery": "meraki-redboot-stage1-menu-option-2",
             "legacy_delivery": "meraki-redboot-stage1-menu-option-1-ram-upload",
             "payloads": recovery_payloads,
+        },
+        "uart_liveboot": {
+            "enabled": True,
+            "protocol_version": 3,
+            "full_image_bytes": TOTAL_BYTES,
+            "operations": ["verify", "dry-run", "liveboot"],
+            "flash_access": "none",
+            "delivery": "meraki-redboot-stage1-menu-option-3",
+            "legacy_delivery": "meraki-redboot-stage1-menu-option-1-ram-upload",
+            "transport_contract": "pmosrec-v3-adaptive-uart-sparse-lz4-v1",
+            "transport_integrity": ["frame-crc32", "compact-ack-crc32", "object-crc32", "object-sha256", "reconstructed-image-sha256"],
+            "linux_handoff": "mips-legacy-argc-argv-envp-external-initrd-v1",
+            "rootfs_handoff": "squashfs-as-legacy-initrd-v1",
+            "payloads": {"jaguar1": live_payload},
         },
     }
     manifest["artifact"] = {

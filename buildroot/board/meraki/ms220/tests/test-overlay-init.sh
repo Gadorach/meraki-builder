@@ -6,6 +6,7 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 mkdir -p "$TMP/bin" "$TMP/run" "$TMP/overlay" "$TMP/etc" "$TMP/root"
 : >"$TMP/mounts"
+: >"$TMP/cmdline"
 
 cat >"$TMP/bin/mount" <<'MOCK'
 #!/bin/sh
@@ -48,7 +49,9 @@ run_init() {
   POSTMERKOS_ETC_TARGET="$TMP/etc" \
   POSTMERKOS_ROOT_TARGET="$TMP/root" \
   POSTMERKOS_PROC_MOUNTS="$TMP/mounts" \
+  POSTMERKOS_PROC_CMDLINE="$TMP/cmdline" \
   POSTMERKOS_OVERLAY_RECOVERY_MARKER="$TMP/run/recovery.json" \
+  POSTMERKOS_LIVE_MARKER="$TMP/run/live.json" \
   POSTMERKOS_OVERLAY_LOG="$TMP/run/overlay.log" \
   MOCK_PERSISTENT_FAIL="${1:-0}" "$SCRIPT" start
 }
@@ -75,4 +78,19 @@ grep -q '"persistence":false' "$TMP/run/recovery.json"
 grep -Fq "$TMP/etc overlay" "$TMP/mounts"
 grep -Fq "$TMP/root overlay" "$TMP/mounts"
 
-printf '%s\n' 'early overlay recovery init tests passed'
+
+# PMOSLIVE must never attempt the JFFS2 mount. It must create an explicit live
+# marker and use the same tmpfs-backed overlay machinery for /etc and /root.
+: >"$TMP/mounts"
+rm -rf "$TMP/overlay"/* "$TMP/run/recovery.json" "$TMP/run/live.json"
+printf '%s\n' 'console=ttyS0,115200 postmerkos.live=1 root=/dev/ram0' >"$TMP/cmdline"
+run_init 0
+! grep -Fq ' jffs2 ' "$TMP/mounts"
+grep -Fq "$TMP/overlay tmpfs" "$TMP/mounts"
+grep -q '"transport":"pmoslive"' "$TMP/run/live.json"
+grep -q '"flash_mounted":false' "$TMP/run/live.json"
+grep -q '"persistence":false' "$TMP/run/recovery.json"
+grep -Fq "$TMP/etc overlay" "$TMP/mounts"
+grep -Fq "$TMP/root overlay" "$TMP/mounts"
+
+printf '%s\n' 'early overlay recovery and PMOSLIVE init tests passed'

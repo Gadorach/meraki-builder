@@ -10,8 +10,10 @@ OVERLAY=${POSTMERKOS_OVERLAY_MOUNT:-/overlay}
 ETC_TARGET=${POSTMERKOS_ETC_TARGET:-/etc}
 ROOT_TARGET=${POSTMERKOS_ROOT_TARGET:-/root}
 MARKER=${POSTMERKOS_OVERLAY_RECOVERY_MARKER:-$RUNDIR/overlay-recovery-mode}
+LIVE_MARKER=${POSTMERKOS_LIVE_MARKER:-$RUNDIR/live-mode}
 LOG=${POSTMERKOS_OVERLAY_LOG:-$RUNDIR/overlay.log}
 PROC_MOUNTS=${POSTMERKOS_PROC_MOUNTS:-/proc/mounts}
+PROC_CMDLINE=${POSTMERKOS_PROC_CMDLINE:-/proc/cmdline}
 mkdir -p "$RUNDIR"
 
 # BusyBox mount -a runs before rcS. In a partially damaged overlay, /etc may
@@ -29,6 +31,11 @@ fi
 log() {
     printf '%s\n' "$*" >>"$LOG" 2>/dev/null || true
     printf 'postmerkOS overlay: %s\n' "$*" >/dev/console 2>/dev/null || true
+}
+
+live_boot() {
+    [ -r "$PROC_CMDLINE" ] || return 1
+    grep -Eq '(^|[[:space:]])postmerkos\.live=1([[:space:]]|$)' "$PROC_CMDLINE" 2>/dev/null
 }
 
 mounted() {
@@ -84,9 +91,13 @@ mount_overlay_target() {
 }
 
 start_overlay() {
-    rm -f "$MARKER"
+    rm -f "$MARKER" "$LIVE_MARKER"
     mkdir -p "$OVERLAY"
-    if ! mounted "$OVERLAY"; then
+    if live_boot; then
+        recovery_tmpfs liveboot || return 1
+        printf '%s\n' '{"active":true,"transport":"pmoslive","persistence":false,"flash_mounted":false}' >"$LIVE_MARKER"
+        log "PMOSLIVE mode detected; JFFS2 remains unmounted and all writable state is RAM-backed"
+    elif ! mounted "$OVERLAY"; then
         if ! mount "$OVERLAY" >/dev/null 2>&1; then
             recovery_tmpfs mount-failed || return 1
         fi

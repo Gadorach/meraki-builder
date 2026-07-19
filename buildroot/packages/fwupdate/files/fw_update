@@ -90,6 +90,10 @@ done
 [ -n "$ARTIFACT_NAME" ] || ARTIFACT_NAME=$(basename "$FIRMWARE")
 case "$ARTIFACT_NAME" in ''|*/*|*[!A-Za-z0-9._-]*) fw_die "invalid artifact basename: $ARTIFACT_NAME" ;; esac
 
+if is_live_boot && [ "$VERIFY_ONLY" -ne 1 ] && [ "$DRY_RUN" -ne 1 ]; then
+    fw_die "flash writes are disabled while running from PMOSLIVE; reboot into the installed firmware first"
+fi
+
 case "$OVERLAY_POLICY" in
     preserve|migrate|reset|image) ;;
     *) fw_die "invalid overlay policy: $OVERLAY_POLICY" ;;

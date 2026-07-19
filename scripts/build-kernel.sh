@@ -30,6 +30,9 @@ if bool_enabled "${CLEAN_KERNEL:-0}"; then
   make ARCH=mips CROSS_COMPILE="$CROSS_COMPILE" mrproper
 fi
 make ARCH=mips CROSS_COMPILE="$CROSS_COMPILE" msxx_defconfig
+python3 "$SCRIPT_DIR/configure-liveboot-kernel.py" --config .config
+make ARCH=mips CROSS_COMPILE="$CROSS_COMPILE" olddefconfig
+python3 "$SCRIPT_DIR/configure-liveboot-kernel.py" --config .config --verify
 make ARCH=mips CROSS_COMPILE="$CROSS_COMPILE" prepare
 run_logged kernel-build make -j"$JOBS" ARCH=mips CROSS_COMPILE="$CROSS_COMPILE" vmlinuz
 "${CROSS_COMPILE}objcopy" -O binary -S vmlinuz vmlinuz.bin

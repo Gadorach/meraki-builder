@@ -1,0 +1,6 @@
+Project: meraki-builder
+Release: pmoslive-mem120-hwtest1
+Date: 2026-07-18
+Source tree: complete working tree without .git metadata or generated caches
+Validation log: PMOSLIVE-FINAL-TEST-RESULTS.log
+Memory contract: PMOSLIVE-MEMORY-MAP.md

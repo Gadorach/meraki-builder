@@ -58,6 +58,7 @@ LOADER_SOURCE_SELECTION_RECORD="$ARTIFACTS_DIR/meraki-redboot-source.json"
 LOADER_SOURCE_VERSION_FILE="$ARTIFACTS_DIR/meraki-redboot-version.txt"
 LOADER_BUILD_SOURCE_RECORD="$ARTIFACTS_DIR/loader1.bin.source.json"
 RECOVERY_ARTIFACT_DIR="$ARTIFACTS_DIR/recovery"
+LIVEBOOT_ARTIFACT_DIR="$ARTIFACTS_DIR/liveboot"
 
 VENDOR_MODULE_TOOL="$REPO_ROOT/buildroot/board/meraki/ms220/vendor-module-tree.py"
 VENDOR_MODULE_REQUIRED="$REPO_ROOT/buildroot/board/meraki/ms220/vendor-modules.required"

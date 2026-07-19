@@ -1,0 +1,124 @@
+
+===== meraki-redboot unit tests =====
+.................................................
+----------------------------------------------------------------------
+Ran 49 tests in 17.968s
+
+OK
+PASS: MSCC SW_MODE chip-select uses active-mask semantics
+
+===== meraki-redboot complete wrapper structural test =====
+validated strict: crc=strict size=legacy-strict loader=15992 bytes image=262144 bytes
+  active:   0x38310-0x3c187
+  fallback: 0x3c188-0x3ffff
+UART stage1: fixed uncached RAM entry 0xa7f00000; size=0x3b34; direct calls remain inside the stage
+validated development: crc=warn size=legacy-warn loader=16408 bytes image=262144 bytes
+  active:   0x17fd0-0x1bfe7
+  fallback: 0x1bfe8-0x1ffff
+  stage1:   0x20000-0x23b33
+validated permissive: crc=off size=hard-only loader=12808 bytes image=262144 bytes
+  active:   0x39bf0-0x3cdf7
+  fallback: 0x3cdf8-0x3ffff
+UART stage1: fixed uncached RAM entry 0xa7f00000; size=0x3bb4; direct calls remain inside the stage
+validated strict-uart: crc=strict size=legacy-strict loader=16200 bytes image=262144 bytes
+  active:   0x18170-0x1c0b7
+  fallback: 0x1c0b8-0x1ffff
+  stage1:   0x20000-0x23bb3
+packed /tmp/tmp.qvlphT0GlL/kernel.bin -> /tmp/tmp.qvlphT0GlL/kernel.payload.bin: payload=0x20, padding=9, crc32=0x22bcf5c8
+magic:        0x4d495053
+load address: 0x81000000
+payload size: 0x20 (32 bytes)
+entry point:  0x81000000
+stored CRC:   0x22bcf5c8
+computed CRC: 0x22bcf5c8
+reserved:     0x00000000 0x00000000 0x00000000
+payload header and CRC are valid
+Clang structural source/wrapper test passed for: strict development permissive strict-uart.
+
+===== PMOSREC structural test =====
+Clang recovery payload structural builds passed with byte-zero entry for Luton26 and Jaguar1.
+
+===== PMOSLIVE and stage1 structural test =====
+Clang PMOSLIVE/stage1 structural build passed: live=27352 bytes, stage1=117832 bytes.
+
+===== kernel liveboot config test =====
+PMOSLIVE kernel config tests passed
+
+===== artifact manifest tests =====
+test_bootloader_overlapping_scratch_contract_is_rejected (__main__.ArtifactManifestTests.test_bootloader_overlapping_scratch_contract_is_rejected) ... ok
+test_complete_contract_is_embedded (__main__.ArtifactManifestTests.test_complete_contract_is_embedded) ... ok
+test_missing_embedded_descriptor_is_rejected (__main__.ArtifactManifestTests.test_missing_embedded_descriptor_is_rejected) ... ok
+test_missing_hardware_preflight_contract_is_rejected (__main__.ArtifactManifestTests.test_missing_hardware_preflight_contract_is_rejected) ... ok
+test_tampered_payload_is_rejected (__main__.ArtifactManifestTests.test_tampered_payload_is_rejected) ... ok
+test_wrong_family_model_partition_is_rejected (__main__.ArtifactManifestTests.test_wrong_family_model_partition_is_rejected) ... ok
+
+----------------------------------------------------------------------
+Ran 6 tests in 19.180s
+
+OK
+
+===== loader source contract =====
+authoritative meraki-redboot/postmerkos-ui source policy passed
+
+===== build cache contract =====
+Buildroot WebSocket/cache and compact mDNS contract tests passed
+
+===== documentation links =====
+documentation link check passed (67 Markdown files)
+
+===== pipefail feature probe =====
+Pipefail-safe configd feature probe test passed
+
+===== bootloader protocol tests =====
+........................
+----------------------------------------------------------------------
+Ran 24 tests in 9.164s
+
+OK
+object 2: 896/1950 bytes (45%)
+object 2: 1280/1950 bytes (65%)
+object 2: 1664/1950 bytes (85%)
+object 2: 1950/1950 bytes (100%)
+
+===== PMOSREC v3 transport tests =====
+[flasher] Target validated the complete bundle; automatically sending ERASEFLASH 12620a82 under the prior FLASH-ALL authorization.
+[flasher] Flash verified; target reset requested. Waiting for the next boot banner...
+[flasher] Reboot detected at 460800 baud: LinuxLoader built test
+...[flasher] Selected UART rate: 464914 baud (conservative one-pass scan).
+.[flasher] Qualified transport: frame=4096 bytes, window=1 (flow-control-safe production window), sparse=yes, lz4=yes, sparse-lz4=yes
+.[flasher] Selected UART rate: 460800 baud (diagnostic scan).
+.[flasher] Qualified transport: frame=4096 bytes, window=4 (diagnostic ascending scan), sparse=yes, lz4=yes, sparse-lz4=yes
+..........[flasher] Incorrect confirmation. Required: ERASEFLASH deadbeef. Retry is unlimited.
+[flasher] Flash verified; target reset requested. Waiting for the next boot banner...
+[flasher] Reboot detected at 460800 baud: LinuxLoader built test
+.[flasher] Object upload: 0% complete — 0/88 wire bytes — ~1 seconds remaining
+PMOS3 ACK object=03 base=0000 count=02 retry=00000000 status=00000000
+[flasher] Object upload: 100% complete — 88/88 wire bytes — ~0 minutes remaining
+....[flasher] raw       : 16941056 wire bytes in 4096 frames
+[flasher] sparse    : 8470528 wire bytes in 2048 frames
+[flasher] lz4       : 249856 wire bytes in 4096 frames
+[flasher] Selected firmware representation: lz4
+..
+----------------------------------------------------------------------
+Ran 23 tests in 11.049s
+
+OK
+
+===== overlay liveboot tests =====
+early overlay recovery and PMOSLIVE init tests passed
+
+===== fwupdate live-mode tests =====
+fwupdate helper, manifest, MTD geometry, and chassis LED tests passed
+
+===== vendor module integration tests =====
+
+==> Staged complete VCore-III vendor module matrix in /tmp/postmerkos-modules.F2H3pF/generated-overlay/lib/modules
+
+==> Staged complete VCore-III vendor module matrix in /tmp/postmerkos-modules.F2H3pF/prepared-buildroot/board/meraki/ms220/vendor-modules
+vendor-module-tree: required platform module is missing/invalid: jaguar/vc_click.ko
+vendor-module-tree: complete module inventory differs from actual tree; missing=['vendor_helpers/vendor_diag.ko'] unlisted=[]
+platform-complete module inclusion and boot-time family-selection tests passed
+
+===== Python syntax =====
+
+===== Shell syntax =====

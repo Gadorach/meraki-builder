@@ -159,7 +159,7 @@ def enter_recovery(
             error_prefixes=("PMOSBOOT WARN-MENU-TIMEOUT",),
         )
         require_hex_field(trigger, MENU_BYTE, 0x0D, "menu trigger")
-        link.wait_for(("PMOSBOOT MENU 1=UART-RAMLOADER 2=FW-RECOVERY",), 4.0)
+        link.wait_for(("PMOSBOOT MENU 1=UART-RAMLOADER 2=FW-RECOVERY 3=LIVEBOOT",), 4.0)
         link.wait_for(("PMOSBOOT MENU-READY",), 4.0)
         choice = b"1" if path == "ram-upload" else b"2"
         link.write_all(choice)
@@ -272,7 +272,10 @@ def main() -> int:
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--target-model", required=True)
     parser.add_argument("--force", action="store_true")
-    parser.add_argument("--load-address", default="0x81000000")
+    parser.add_argument(
+        "--load-address",
+        help="PMOSRAM destination; defaults to the selected payload descriptor load address",
+    )
     parser.add_argument("--entry")
     parser.add_argument("--chunk-size", type=int, default=1024, help="stable RAM-loader payload chunk size")
     parser.add_argument("--frame-retries", type=int, default=3)
@@ -331,8 +334,16 @@ def main() -> int:
     if args.recovery_path == "ram-upload" and payload_data is None:
         raise ProtocolError("--recovery-path ram-upload requires --payload")
 
-    load = int(args.load_address, 0)
-    entry = int(args.entry, 0) if args.entry else load
+    load = int(args.load_address, 0) if args.load_address else (
+        descriptor.load_address if descriptor is not None else 0x86C00000
+    )
+    entry = int(args.entry, 0) if args.entry else (
+        descriptor.entry_address if descriptor is not None else load
+    )
+    if descriptor is not None and (load != descriptor.load_address or entry != descriptor.entry_address):
+        raise ProtocolError(
+            "requested PMOSRAM load/entry address does not match the recovery payload descriptor"
+        )
     if bundle is not None:
         print(f"firmware: {args.firmware} ({args.firmware.stat().st_size} bytes)")
         print(f"manifest: {manifest} ({len(bundle.manifest_bytes)} bytes)")

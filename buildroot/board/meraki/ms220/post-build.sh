@@ -55,22 +55,25 @@ revision="${POSTMERKOS_GIT_REVISION:-unknown}"
 validated_models="${POSTMERKOS_VALIDATED_MODELS:-MS42P MS320-24P}"
 loader_manifest="${MS42P_LOADER_MANIFEST:-}"
 recovery_artifact_dir="${MS42P_RECOVERY_ARTIFACT_DIR:-}"
+liveboot_artifact_dir="${MS42P_LIVEBOOT_ARTIFACT_DIR:-}"
 [ -s "$loader_manifest" ] || { echo "meraki-redboot capability manifest is missing" >&2; exit 1; }
 [ -d "$recovery_artifact_dir" ] || { echo "Recovery artifact directory is missing" >&2; exit 1; }
+[ -d "$liveboot_artifact_dir" ] || { echo "PMOSLIVE artifact directory is missing" >&2; exit 1; }
 project_repo="${POSTMERKOS_PROJECT_REPO:-Gadorach/meraki-builder}"
 if ! printf '%s' "$project_repo" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'; then
     echo "POSTMERKOS_PROJECT_REPO is not a valid owner/repo slug: $project_repo" >&2
     exit 1
 fi
-python3 - "$TARGET_DIR/etc/postmerkos-release.json" "$release" "$build_version" "$revision" "$validated_models" "$loader_manifest" "$recovery_artifact_dir" "$project_repo" <<'PY_RELEASE'
+python3 - "$TARGET_DIR/etc/postmerkos-release.json" "$release" "$build_version" "$revision" "$validated_models" "$loader_manifest" "$recovery_artifact_dir" "$liveboot_artifact_dir" "$project_repo" <<'PY_RELEASE'
 import hashlib
 import json
 import re
 import sys
 from pathlib import Path
 
-output, release, build_time, revision, validated_raw, loader_manifest_path, recovery_dir_raw, project_repo = sys.argv[1:]
+output, release, build_time, revision, validated_raw, loader_manifest_path, recovery_dir_raw, liveboot_dir_raw, project_repo = sys.argv[1:]
 recovery_dir = Path(recovery_dir_raw)
+liveboot_dir = Path(liveboot_dir_raw)
 models = [
     "MS22", "MS22P",
     "MS220-8", "MS220-8P", "MS220-24", "MS220-24P",
@@ -89,10 +92,12 @@ if uart.get("enabled") is not True or uart.get("protocol_version") != 2:
     raise SystemExit("meraki-redboot manifest does not declare UART RAM-loader v2")
 if loader_manifest.get("format") != "postmerkos.vcoreiii-linuxloader-build.v7":
     raise SystemExit("meraki-redboot manifest format is not v7")
-if uart.get("boot_menu", {}).get("options") != {"1": "uart-ramloader", "2": "embedded-firmware-recovery"}:
+if uart.get("boot_menu", {}).get("options") != {"1": "uart-ramloader", "2": "embedded-firmware-recovery", "3": "embedded-liveboot"}:
     raise SystemExit("meraki-redboot manifest does not declare the v0.7 boot menu")
 if uart.get("image_check_diagnostics") != "structured-pass-warn-fail-skip-values-v1":
     raise SystemExit("meraki-redboot manifest lacks structured diagnostics")
+if uart.get("stage1_flash_offset") != 0x00020000 or uart.get("stage1_storage_contract") != "single-shared-boot-region-blob-v1":
+    raise SystemExit("meraki-redboot manifest lacks the shared stage-1 boot-region contract")
 if loader_manifest.get("policies", {}).get("payload_slot_end") != 0x300000:
     raise SystemExit("meraki-redboot payload slot boundary does not match postmerkOS")
 embedded = uart.get("embedded_recovery", {})
@@ -136,8 +141,8 @@ for family in ("luton26", "jaguar1"):
         raise SystemExit(f"Recovery descriptor flash geometry mismatch: {descriptor_path}")
     if descriptor.get("operations") != ["verify", "preflight", "dry-run", "flash"]:
         raise SystemExit(f"Recovery descriptor operation contract mismatch: {descriptor_path}")
-    if descriptor.get("load_address") != 0x81000000 or descriptor.get("entry_address") != 0x81000000:
-        raise SystemExit(f"Recovery descriptor load/entry address mismatch: {descriptor_path}")
+    if descriptor.get("load_address") != 0x86C00000 or descriptor.get("entry_address") != 0x86C00000:
+        raise SystemExit(f"Recovery descriptor high-memory load/entry address mismatch: {descriptor_path}")
     if descriptor.get("entry_contract") != "flat-binary-byte-zero-v1":
         raise SystemExit(f"Recovery descriptor lacks corrected byte-zero entry contract: {descriptor_path}")
     if descriptor.get("manifest_lookup_contract") != "direct-object-members-v1":
@@ -174,8 +179,8 @@ for family in ("luton26", "jaguar1"):
     embedded_record = embedded.get(family)
     if not isinstance(embedded_record, dict) or embedded_record.get("size") != len(payload_data) or str(embedded_record.get("sha256", "")).lower() != digest:
         raise SystemExit(f"meraki-redboot embedded recovery binding mismatch: {family}")
-    if embedded_record.get("load_address") != 0x81000000 or embedded_record.get("entry_address") != 0x81000000:
-        raise SystemExit(f"meraki-redboot embedded recovery load/entry mismatch: {family}")
+    if embedded_record.get("load_address") != 0x86C00000 or embedded_record.get("entry_address") != 0x86C00000:
+        raise SystemExit(f"meraki-redboot embedded recovery high-memory load/entry mismatch: {family}")
     if embedded_record.get("entry_contract") != "flat-binary-byte-zero-v1":
         raise SystemExit(f"meraki-redboot embedded recovery lacks corrected byte-zero entry contract: {family}")
     if embedded_record.get("manifest_lookup_contract") != "direct-object-members-v1":
@@ -207,6 +212,95 @@ for family in ("luton26", "jaguar1"):
         "adaptive_transport": descriptor.get("adaptive_transport"),
         "preflight_scratch": descriptor["preflight_scratch"],
     }
+
+live_descriptor_path = liveboot_dir / "pmoslive-jaguar1.descriptor.json"
+if not live_descriptor_path.is_file():
+    raise SystemExit(f"PMOSLIVE descriptor is missing: {live_descriptor_path}")
+live_descriptor = json.loads(live_descriptor_path.read_text(encoding="utf-8"))
+live_binary_record = live_descriptor.get("binary", {})
+live_binary_path = liveboot_dir / str(live_binary_record.get("filename", ""))
+if not live_binary_path.is_file():
+    raise SystemExit(f"PMOSLIVE binary is missing: {live_binary_path}")
+live_data = live_binary_path.read_bytes()
+live_digest = hashlib.sha256(live_data).hexdigest()
+live_marker = (
+    b"PMOSLIVE3;SOC=jaguar1;FAMILY=2;PROTO=3;FLASH=0;LIVEBOOT=1;"
+    b"IMAGE_BYTES=16777216;KERNEL=81000000;ROOTFS=87000000;MEM_MIB=120;"
+    b"FRAME_MAX=4096;WINDOW_MAX=16;SPARSE=1;LZ4=1;END"
+)
+if live_data.count(live_marker) != 1:
+    raise SystemExit("PMOSLIVE embedded target descriptor mismatch")
+if any(marker in live_data for marker in (b"ERASEFLASH", b"FLASH-PREFLIGHT", b"PROGRESS ERASE", b"PROGRESS PROGRAM")):
+    raise SystemExit("PMOSLIVE unexpectedly contains flash-write markers")
+if live_descriptor.get("format") != "postmerkos.uart-liveboot-payload.v1" or live_descriptor.get("protocol_version") != 3:
+    raise SystemExit("PMOSLIVE descriptor format/protocol mismatch")
+if live_descriptor.get("soc_family") != "jaguar1" or live_descriptor.get("soc_family_id") != 2:
+    raise SystemExit("PMOSLIVE descriptor family mismatch")
+if live_descriptor.get("accepted_models") != ["MS42", "MS42P"]:
+    raise SystemExit("PMOSLIVE descriptor model allow-list mismatch")
+if live_descriptor.get("operations") != ["verify", "dry-run", "liveboot"] or live_descriptor.get("flash_access") != "none":
+    raise SystemExit("PMOSLIVE descriptor operation/flash contract mismatch")
+if live_descriptor.get("load_address") != 0x86C00000 or live_descriptor.get("entry_address") != 0x86C00000:
+    raise SystemExit("PMOSLIVE descriptor high-memory load/entry mismatch")
+if live_descriptor.get("transport_contract") != "pmosrec-v3-adaptive-uart-sparse-lz4-v1":
+    raise SystemExit("PMOSLIVE descriptor transport contract mismatch")
+if live_descriptor.get("linux_handoff") != "mips-legacy-argc-argv-envp-external-initrd-v1":
+    raise SystemExit("PMOSLIVE descriptor Linux handoff mismatch")
+if live_descriptor.get("rootfs_handoff") != "squashfs-as-legacy-initrd-v1":
+    raise SystemExit("PMOSLIVE descriptor rootfs handoff mismatch")
+live_ram = {
+    "kernel_load_address": 0x81000000,
+    "image_staging_address": 0x81400000,
+    "manifest_address": 0x82400000,
+    "payload_address": 0x86C00000,
+    "squashfs_address": 0x87000000,
+    "boot_params_physical_address": 0x00000400,
+    "boot_params_uncached_address": 0xA0000400,
+    "boot_params_bytes": 0x00000C00,
+    "linux_memory_mib": 120,
+    "top_reserved_mib": 8,
+}
+if live_descriptor.get("ram_layout") != live_ram:
+    raise SystemExit("PMOSLIVE descriptor RAM layout mismatch")
+if live_binary_record.get("bytes") != len(live_data) or str(live_binary_record.get("sha256", "")).lower() != live_digest:
+    raise SystemExit("PMOSLIVE descriptor binary record mismatch")
+embedded_live = uart.get("embedded_liveboot", {}).get("jaguar1", {})
+if embedded_live.get("size") != len(live_data) or str(embedded_live.get("sha256", "")).lower() != live_digest:
+    raise SystemExit("meraki-redboot embedded PMOSLIVE binding mismatch")
+for key, value in {
+    "load_address": 0x86C00000,
+    "entry_address": 0x86C00000,
+    "entry_contract": "flat-binary-byte-zero-v1",
+    "flash_access": "none",
+    "accepted_models": ["MS42", "MS42P"],
+    "transport_contract": "pmosrec-v3-adaptive-uart-sparse-lz4-v1",
+    "linux_handoff": "mips-legacy-argc-argv-envp-external-initrd-v1",
+    "rootfs_handoff": "squashfs-as-legacy-initrd-v1",
+    "kernel_load_address": 0x81000000,
+    "squashfs_address": 0x87000000,
+    "boot_params_physical_address": 0x00000400,
+    "boot_params_uncached_address": 0xA0000400,
+    "boot_params_bytes": 0x00000C00,
+    "linux_memory_mib": 120,
+    "top_reserved_mib": 8,
+}.items():
+    if embedded_live.get(key) != value:
+        raise SystemExit(f"meraki-redboot embedded PMOSLIVE {key} mismatch")
+live_payload = {
+    "filename": live_binary_path.name,
+    "bytes": len(live_data),
+    "sha256": live_digest,
+    "soc_family_id": 2,
+    "accepted_models": ["MS42", "MS42P"],
+    "load_address": 0x86C00000,
+    "entry_address": 0x86C00000,
+    "entry_contract": "flat-binary-byte-zero-v1",
+    "flash_access": "none",
+    "transport_contract": "pmosrec-v3-adaptive-uart-sparse-lz4-v1",
+    "linux_handoff": "mips-legacy-argc-argv-envp-external-initrd-v1",
+    "rootfs_handoff": "squashfs-as-legacy-initrd-v1",
+    "ram_layout": live_ram,
+}
 data = {
     "version": release,
     "project_repo": project_repo,
@@ -233,6 +327,10 @@ data = {
             "supported_soc_families": list(uart["supported_soc_families"]),
             "transport_integrity": list(uart["transport_integrity"]),
             "loader_sha256": str(loader_manifest["boot_region"]["sha256"]),
+            "boot_menu": uart["boot_menu"],
+            "image_check_diagnostics": uart["image_check_diagnostics"],
+            "stage1_flash_offset": int(uart["stage1_flash_offset"]),
+            "stage1_storage_contract": uart["stage1_storage_contract"],
             "embedded_recovery": {
                 family: {
                     "bytes": payloads[family]["bytes"],
@@ -246,6 +344,16 @@ data = {
                     "adaptive_transport_contract": payloads[family]["adaptive_transport_contract"],
                 } for family in ("luton26", "jaguar1")
             },
+            "embedded_liveboot": {"jaguar1": {
+                **dict(live_payload),
+                "kernel_load_address": live_ram["kernel_load_address"],
+                "squashfs_address": live_ram["squashfs_address"],
+                "boot_params_physical_address": live_ram["boot_params_physical_address"],
+                "boot_params_uncached_address": live_ram["boot_params_uncached_address"],
+                "boot_params_bytes": live_ram["boot_params_bytes"],
+                "linux_memory_mib": live_ram["linux_memory_mib"],
+                "top_reserved_mib": live_ram["top_reserved_mib"],
+            }},
         },
         "uart_firmware": {
             "enabled": True,
@@ -274,6 +382,20 @@ data = {
             "flash_geometry": common_geometry,
             "accepted_jedec_ids": common_jedec,
             "payloads": payloads,
+        },
+        "uart_liveboot": {
+            "enabled": True,
+            "protocol_version": 3,
+            "full_image_bytes": 16 * 1024 * 1024,
+            "operations": ["verify", "dry-run", "liveboot"],
+            "flash_access": "none",
+            "delivery": "meraki-redboot-stage1-menu-option-3",
+            "legacy_delivery": "meraki-redboot-stage1-menu-option-1-ram-upload",
+            "transport_contract": "pmosrec-v3-adaptive-uart-sparse-lz4-v1",
+            "transport_integrity": ["frame-crc32", "compact-ack-crc32", "object-crc32", "object-sha256", "reconstructed-image-sha256"],
+            "linux_handoff": "mips-legacy-argc-argv-envp-external-initrd-v1",
+            "rootfs_handoff": "squashfs-as-legacy-initrd-v1",
+            "payloads": {"jaguar1": live_payload},
         },
     },
 }

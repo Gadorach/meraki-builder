@@ -42,7 +42,7 @@ class BundleFixture:
         self.image = root / "firmware.bin"
         self.manifest = root / "firmware.bin.manifest.json"
         image = bytearray(b"\0" * bp.FULL_IMAGE_SIZE)
-        markers = (b"PMOSRAM READY 2", b"PMOSBOOT MENU-PROBE", b"PMOSBOOT MENU 1=UART-RAMLOADER 2=FW-RECOVERY")
+        markers = (b"PMOSRAM READY 2", b"PMOSBOOT MENU-PROBE", b"PMOSBOOT MENU 1=UART-RAMLOADER 2=FW-RECOVERY 3=LIVEBOOT")
         cursor = 0x1000
         for marker in markers:
             image[cursor:cursor + len(marker)] = marker
@@ -52,7 +52,11 @@ class BundleFixture:
         words[4] = zlib.crc32(bp.SPIM_HEADER.pack(*words) + kernel) & 0xFFFFFFFF
         kernel_image = bp.SPIM_HEADER.pack(*words) + kernel
         image[bp.KERNEL_OFFSET:bp.KERNEL_OFFSET + len(kernel_image)] = kernel_image
-        image[bp.ROOTFS_OFFSET:bp.ROOTFS_OFFSET + 4] = b"hsqs"
+        rootfs = bytearray(b"\0" * 4096)
+        rootfs[:4] = b"hsqs"
+        struct.pack_into("<H", rootfs, 28, 4)
+        struct.pack_into("<Q", rootfs, 40, 96)
+        image[bp.ROOTFS_OFFSET:bp.ROOTFS_OFFSET + len(rootfs)] = rootfs
         self.image.write_bytes(image)
         self.payload_luton = root / "recovery-luton26.bin"
         self.payload_jaguar = root / "recovery-jaguar1.bin"
@@ -73,8 +77,8 @@ class BundleFixture:
                 "soc_family": family,
                 "soc_family_id": family_id,
                 "spi_software_mode_address": spi,
-                "load_address": 0x81000000,
-                "entry_address": 0x81000000,
+                "load_address": 0x86C00000,
+                "entry_address": 0x86C00000,
                 "entry_contract": "flat-binary-byte-zero-v1",
                 "manifest_lookup_contract": "direct-object-members-v1",
                 "hardware_preflight_contract": "spi-nor-scratch-rw-restore-loader-crc-v4",
@@ -99,8 +103,8 @@ class BundleFixture:
                 "soc_family_id": 1,
                 "spi_software_mode_address": 0x70000064,
                 "accepted_models": ["MS22", "MS22P", "MS220-8", "MS220-8P", "MS220-24", "MS220-24P"],
-                "load_address": 0x81000000,
-                "entry_address": 0x81000000,
+                "load_address": 0x86C00000,
+                "entry_address": 0x86C00000,
                 "entry_contract": "flat-binary-byte-zero-v1",
                 "manifest_lookup_contract": "direct-object-members-v1",
                 "hardware_preflight_contract": "spi-nor-scratch-rw-restore-loader-crc-v4",
@@ -114,13 +118,40 @@ class BundleFixture:
                 "soc_family_id": 2,
                 "spi_software_mode_address": 0x70000068,
                 "accepted_models": ["MS42P", "MS42", "MS320-24", "MS320-24P", "MS220-48", "MS220-48P", "MS220-48LP", "MS220-48FP", "MS320-48", "MS320-48P", "MS320-48LP", "MS320-48FP"],
-                "load_address": 0x81000000,
-                "entry_address": 0x81000000,
+                "load_address": 0x86C00000,
+                "entry_address": 0x86C00000,
                 "entry_contract": "flat-binary-byte-zero-v1",
                 "manifest_lookup_contract": "direct-object-members-v1",
                 "hardware_preflight_contract": "spi-nor-scratch-rw-restore-loader-crc-v4",
                 "spi_master_enable_contract": "preserve-general-ctrl-enable-spi-v1",
                 "adaptive_transport_contract": "pmosrec-v3-adaptive-uart-sparse-lz4-v1",
+            },
+        }
+        live_sha = "a" * 64
+        live_record = {
+            "filename": "pmoslive-jaguar1.bin",
+            "bytes": 27112,
+            "sha256": live_sha,
+            "soc_family_id": 2,
+            "accepted_models": ["MS42", "MS42P"],
+            "load_address": 0x86C00000,
+            "entry_address": 0x86C00000,
+            "entry_contract": "flat-binary-byte-zero-v1",
+            "flash_access": "none",
+            "transport_contract": "pmosrec-v3-adaptive-uart-sparse-lz4-v1",
+            "linux_handoff": "mips-legacy-argc-argv-envp-external-initrd-v1",
+            "rootfs_handoff": "squashfs-as-legacy-initrd-v1",
+            "ram_layout": {
+                "kernel_load_address": 0x81000000,
+                "image_staging_address": 0x81400000,
+                "manifest_address": 0x82400000,
+                "payload_address": 0x86C00000,
+                "squashfs_address": 0x87000000,
+                "boot_params_physical_address": 0x00000400,
+                "boot_params_uncached_address": 0xA0000400,
+                "boot_params_bytes": 0x00000C00,
+                "linux_memory_mib": 120,
+                "top_reserved_mib": 8,
             },
         }
         data = {
@@ -134,10 +165,12 @@ class BundleFixture:
                     "loader_sha256": loader_digest,
                     "supported_soc_families": ["luton26", "jaguar1"],
                     "boot_menu": {
-                        "options": {"1": "uart-ramloader", "2": "embedded-firmware-recovery"},
+                        "options": {"1": "uart-ramloader", "2": "embedded-firmware-recovery", "3": "embedded-liveboot"},
                         "probe_timeout_ms": 3000, "selection_timeout_ms": 5000,
                     },
                     "image_check_diagnostics": "structured-pass-warn-fail-skip-values-v1",
+                    "stage1_flash_offset": 0x00020000,
+                    "stage1_storage_contract": "single-shared-boot-region-blob-v1",
                     "embedded_recovery": {
                         family: {
                             "bytes": record["bytes"], "sha256": record["sha256"],
@@ -151,6 +184,16 @@ class BundleFixture:
                         }
                         for family, record in payload_records.items()
                     },
+                    "embedded_liveboot": {"jaguar1": {
+                        **dict(live_record),
+                        "kernel_load_address": 0x81000000,
+                        "squashfs_address": 0x87000000,
+                        "boot_params_physical_address": 0x00000400,
+                        "boot_params_uncached_address": 0xA0000400,
+                        "boot_params_bytes": 0x00000C00,
+                        "linux_memory_mib": 120,
+                        "top_reserved_mib": 8,
+                    }},
                 },
                 "uart_firmware": {
                     "enabled": True,
@@ -176,12 +219,28 @@ class BundleFixture:
                     "accepted_jedec_ids": ["c22018", "ef4018"],
                     "payloads": payload_records,
                 },
+                "uart_liveboot": {
+                    "enabled": True,
+                    "protocol_version": 3,
+                    "full_image_bytes": bp.FULL_IMAGE_SIZE,
+                    "operations": ["verify", "dry-run", "liveboot"],
+                    "flash_access": "none",
+                    "delivery": "meraki-redboot-stage1-menu-option-3",
+                    "legacy_delivery": "meraki-redboot-stage1-menu-option-1-ram-upload",
+                    "transport_contract": "pmosrec-v3-adaptive-uart-sparse-lz4-v1",
+                    "transport_integrity": ["frame-crc32", "compact-ack-crc32", "object-crc32", "object-sha256", "reconstructed-image-sha256"],
+                    "linux_handoff": "mips-legacy-argc-argv-envp-external-initrd-v1",
+                    "rootfs_handoff": "squashfs-as-legacy-initrd-v1",
+                    "payloads": {"jaguar1": live_record},
+                },
             },
             "artifact": {
                 "filename": self.image.name,
                 "bytes": bp.FULL_IMAGE_SIZE,
                 "sha256": digest,
                 "boot_chain": "vcoreiii-linuxloader-spim-v2",
+                "rootfs_bytes": 4096,
+                "rootfs_sha256": hashlib.sha256(rootfs).hexdigest(),
                 "kernel_payload": {
                     "format": "postmerkos.vcoreiii-payload.v1",
                     "header_bytes": bp.SPIM_HEADER.size,
@@ -426,13 +485,13 @@ class ProtocolTests(unittest.TestCase):
         link.wait_for.side_effect = [
             "PMOSBOOT MENU-PROBE TIMEOUT_MS=00000bb8",
             "PMOSBOOT PASS-MENU-TRIGGER: BYTE: 0x0000000D",
-            "PMOSBOOT MENU 1=UART-RAMLOADER 2=FW-RECOVERY",
+            "PMOSBOOT MENU 1=UART-RAMLOADER 2=FW-RECOVERY 3=LIVEBOOT",
             "PMOSBOOT MENU-READY TIMEOUT_MS=00001388",
             "PMOSBOOT PASS-MENU-CHOICE: SELECTED: 0x00000002",
             "PMOSBOOT INFO-RECOVERY: SOURCE: MENU-OPTION-2 | SOC: jaguar1",
             "PMOSBOOT PASS-RECOVERY-SIZE: MAX: 0x00400000 | GOT: 0x000037D8",
-            "PMOSBOOT PASS-RECOVERY-COPY: LOAD: 0x81000000 | SIZE: 0x000037D8",
-            "PMOSBOOT PASS-RECOVERY-EXEC: ENTRY: 0x81000000",
+            "PMOSBOOT PASS-RECOVERY-COPY: LOAD: 0x86c00000 | SIZE: 0x000037D8",
+            "PMOSBOOT PASS-RECOVERY-EXEC: ENTRY: 0x86c00000",
             bp.ProtocolError("timed out waiting for: PMOSREC READY 2"),
         ]
         with self.assertRaisesRegex(bp.EmbeddedRecoveryEntryError, "did not enter PMOSREC v3"):
@@ -446,13 +505,13 @@ class ProtocolTests(unittest.TestCase):
         link.wait_for.side_effect = [
             "PMOSBOOT MENU-PROBE TIMEOUT_MS=00000bb8",
             "PMOSBOOT PASS-MENU-TRIGGER: BYTE: 0x0000000D",
-            "PMOSBOOT MENU 1=UART-RAMLOADER 2=FW-RECOVERY",
+            "PMOSBOOT MENU 1=UART-RAMLOADER 2=FW-RECOVERY 3=LIVEBOOT",
             "PMOSBOOT MENU-READY TIMEOUT_MS=00001388",
             "PMOSBOOT PASS-MENU-CHOICE: SELECTED: 0x00000002",
             f"PMOSBOOT INFO-RECOVERY: SOURCE: MENU-OPTION-2 | SOC: {family}",
             "PMOSBOOT PASS-RECOVERY-SIZE: MAX: 0x00400000 | GOT: 0x000037D8",
-            "PMOSBOOT PASS-RECOVERY-COPY: LOAD: 0x81000000 | SIZE: 0x000037D8",
-            "PMOSBOOT PASS-RECOVERY-EXEC: ENTRY: 0x81000000",
+            "PMOSBOOT PASS-RECOVERY-COPY: LOAD: 0x86c00000 | SIZE: 0x000037D8",
+            "PMOSBOOT PASS-RECOVERY-EXEC: ENTRY: 0x86c00000",
             f"PMOSREC READY 3 SOC={family} FAMILY={family_id:08x}",
             (
                 f"PMOSREC DESCRIPTOR PMOSRECOVERY3;SOC={family};FAMILY={family_id};"
@@ -465,7 +524,7 @@ class ProtocolTests(unittest.TestCase):
             "PMOSREC COMMAND-READY 3",
         ]
         selected = br.enter_recovery(
-            link, "embedded", family, 30.0, None, 0x81000000, 0x81000000,
+            link, "embedded", family, 30.0, None, 0x86C00000, 0x86C00000,
             1024, 3, 5.0,
         )
         self.assertEqual(selected, "embedded")
@@ -484,7 +543,7 @@ class ProtocolTests(unittest.TestCase):
         link.wait_for.side_effect = [
             "PMOSBOOT MENU-PROBE TIMEOUT_MS=00000bb8",
             "PMOSBOOT PASS-MENU-TRIGGER: BYTE: 0x0000000D",
-            "PMOSBOOT MENU 1=UART-RAMLOADER 2=FW-RECOVERY",
+            "PMOSBOOT MENU 1=UART-RAMLOADER 2=FW-RECOVERY 3=LIVEBOOT",
             "PMOSBOOT MENU-READY TIMEOUT_MS=00001388",
             "PMOSBOOT PASS-MENU-CHOICE: SELECTED: 0x00000001",
             "PMOSRAM READY 2 SOC=jaguar1",
@@ -569,7 +628,7 @@ class ProtocolTests(unittest.TestCase):
         link.wait_for.side_effect = [
             "PMOSBOOT MENU-PROBE TIMEOUT_MS=00000bb8",
             "PMOSBOOT PASS-MENU-TRIGGER: BYTE: 0x0000000D",
-            "PMOSBOOT MENU 1=UART-RAMLOADER 2=FW-RECOVERY",
+            "PMOSBOOT MENU 1=UART-RAMLOADER 2=FW-RECOVERY 3=LIVEBOOT",
             "PMOSBOOT MENU-READY TIMEOUT_MS=00001388",
             "PMOSBOOT PASS-MENU-CHOICE: SELECTED: 0x00000002",
             "PMOSBOOT INFO-RECOVERY: SOURCE: MENU-OPTION-2 | SOC: luton26",
@@ -604,6 +663,24 @@ class ProtocolTests(unittest.TestCase):
         with self.assertRaisesRegex(bp.ProtocolError, "protected bootloader"):
             bp.make_preflight_header(scratch_address=0x00030000)
 
+    def test_squashfs_superblock_validation_rejects_wrong_major(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            bundle = BundleFixture(Path(temp))
+            with bundle.image.open("r+b") as stream:
+                stream.seek(bp.ROOTFS_OFFSET + 28)
+                stream.write(struct.pack("<H", 3))
+            artifact = json.loads(bundle.manifest.read_text())["artifact"]
+            with self.assertRaisesRegex(bp.ProtocolError, "major version 3"):
+                bp.validate_squashfs_rootfs(bundle.image, artifact)
+
+    def test_squashfs_rootfs_hash_is_bound_to_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            bundle = BundleFixture(Path(temp))
+            artifact = json.loads(bundle.manifest.read_text())["artifact"]
+            artifact["rootfs_sha256"] = "0" * 64
+            with self.assertRaisesRegex(bp.ProtocolError, "rootfs SHA-256"):
+                bp.validate_squashfs_rootfs(bundle.image, artifact)
+
     def test_verify_operation_never_opens_serial(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -613,6 +690,53 @@ class ProtocolTests(unittest.TestCase):
                  "--operation", "verify", "--recovery-path", "embedded",
                  "--firmware", str(bundle.image), "--manifest", str(bundle.manifest),
                  "--target-model", "MS42P"],
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("without opening the serial port", result.stdout)
+
+    def test_liveboot_verify_validates_payload_without_opening_serial(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bundle = BundleFixture(root)
+            marker = (
+                b"PMOSLIVE3;SOC=jaguar1;FAMILY=2;PROTO=3;FLASH=0;LIVEBOOT=1;"
+                b"IMAGE_BYTES=16777216;KERNEL=81000000;ROOTFS=87000000;MEM_MIB=120;"
+                b"FRAME_MAX=4096;WINDOW_MAX=16;SPARSE=1;LZ4=1;END"
+            )
+            payload = root / "pmoslive-jaguar1.bin"
+            payload.write_bytes(b"live-test\0" + marker + b"\0")
+            digest = hashlib.sha256(payload.read_bytes()).hexdigest()
+            descriptor = root / "pmoslive-jaguar1.descriptor.json"
+            descriptor.write_text(json.dumps({
+                "format": "postmerkos.uart-liveboot-payload.v1",
+                "protocol_version": 3,
+                "soc_family": "jaguar1",
+                "soc_family_id": 2,
+                "flash_access": "none",
+                "load_address": 0x86C00000,
+                "entry_address": 0x86C00000,
+                "binary": {
+                    "filename": payload.name,
+                    "bytes": payload.stat().st_size,
+                    "sha256": digest,
+                },
+            }) + "\n")
+            manifest = json.loads(bundle.manifest.read_text())
+            for record in (
+                manifest["recovery"]["uart_liveboot"]["payloads"]["jaguar1"],
+                manifest["recovery"]["uart_ramloader"]["embedded_liveboot"]["jaguar1"],
+            ):
+                record["filename"] = payload.name
+                record["bytes"] = payload.stat().st_size
+                record["size"] = payload.stat().st_size
+                record["sha256"] = digest
+            bundle.manifest.write_text(json.dumps(manifest) + "\n")
+            result = subprocess.run(
+                [sys.executable, str(TOOL_DIR / "bootloader-liveboot.py"),
+                 "--operation", "verify", "--firmware", str(bundle.image),
+                 "--manifest", str(bundle.manifest), "--target-model", "MS42P",
+                 "--payload", str(payload), "--payload-descriptor", str(descriptor)],
                 text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30,
             )
             self.assertEqual(result.returncode, 0, result.stderr)

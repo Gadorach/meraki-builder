@@ -6,7 +6,7 @@ working root filesystem.
 ## Recovery entry paths
 
 - **RAM upload, menu option 1:** uploads the current family-specific PMOSREC
-  executable to `0x81000000`, verifies it through `PMOSRAM2`, and executes it.
+  executable to `0x86c00000`, verifies it through `PMOSRAM2`, and executes it.
   This is the default because it always supplies the latest recovery logic.
 - **Embedded recovery, menu option 2:** executes the PMOSREC payload stored in
   the installed loader. Use it only when the installed loader advertises the
@@ -58,6 +58,68 @@ Equivalent command-line use:
   --target-model MS42P \
   --serial-device /dev/serial/by-id/<adapter>
 ```
+
+
+## Non-destructive RAM live boot
+
+Jaguar1 MS42/MS42P loaders also provide **menu option 3: LIVEBOOT**. PMOSLIVE is
+linked at `0x86c00000` and reuses PMOSREC v3 transport without linking any SPI
+NOR erase or program implementation. It receives an unchanged, manifest-bound
+16 MiB retail postmerkOS image, verifies and extracts the SPIM kernel to
+`0x81000000`, copies the SquashFS payload to reserved RAM at `0x87000000`, and
+boots Linux with a legacy MIPS external-initrd handoff and `mem=120M`.
+The boot argument workspace is confined to physical `0x400-0xfff` through the
+uncached `0xa0000400` alias; physical 112-120 MiB remains visible to Linux for
+the initrd, while only the top 8 MiB is excluded.
+
+UART-enabled boot regions store one shared stage-1 blob at flash offset
+`0x20000`; the active and fallback LinuxLoader bodies remain separate and both
+copy the same validated stage into uncached RAM at `0xa7f00000`.
+
+Host-side validation does not open the serial port:
+
+```sh
+python3 tools/firmware-flasher/bootloader-liveboot.py \
+  --operation verify \
+  --firmware artifacts/<full-image>.bin \
+  --manifest artifacts/<full-image>.manifest.json \
+  --target-model MS42P \
+  --payload artifacts/liveboot/pmoslive-jaguar1.bin
+```
+
+Exercise the complete transfer and target parsing path without jumping to
+Linux:
+
+```sh
+python3 tools/firmware-flasher/bootloader-liveboot.py \
+  --operation dry-run \
+  --port /dev/serial/by-id/<adapter> \
+  --liveboot-path auto \
+  --payload artifacts/liveboot/pmoslive-jaguar1.bin \
+  --firmware artifacts/<full-image>.bin \
+  --manifest artifacts/<full-image>.manifest.json \
+  --target-model MS42P
+```
+
+Boot from RAM:
+
+```sh
+python3 tools/firmware-flasher/bootloader-liveboot.py \
+  --operation boot \
+  --port /dev/serial/by-id/<adapter> \
+  --liveboot-path auto \
+  --payload artifacts/liveboot/pmoslive-jaguar1.bin \
+  --firmware artifacts/<full-image>.bin \
+  --manifest artifacts/<full-image>.manifest.json \
+  --target-model MS42P
+```
+
+`auto` first tries the embedded menu-3 payload and, after a requested power
+cycle, can fall back to uploading the supplied PMOSLIVE payload through menu
+option 1. `dry-run` stops after image parsing. `boot` requires the
+non-destructive target challenge `BOOTRAM <nonce>` and restores UART to 115200
+before entering Linux. Persistent firmware update and factory-reset helpers
+reject writes when `postmerkos.live=1` is present.
 
 ## PMOSREC v3 sequence
 

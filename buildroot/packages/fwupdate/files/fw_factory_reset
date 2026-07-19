@@ -5,6 +5,7 @@ set -eu
 YES=0
 [ "${1:-}" = --yes ] && YES=1
 [ "$(id -u)" -eq 0 ] || fw_die 'factory reset must run as root'
+is_live_boot && fw_die 'factory reset is disabled while running from PMOSLIVE'
 check_board
 check_mtd_layout
 for command in mkfs.jffs2 dd cp umount mountpoint fuser killall; do

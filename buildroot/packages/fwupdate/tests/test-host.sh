@@ -55,6 +55,20 @@ FWUPDATE_LOG_FILE="$TMP/update.log" \
 FWUPDATE_UPLOAD_DIR="$TMP/uploads" \
 sh -c '. "$1"; check_mtd_layout; [ "$ROOT_MTD" = mtd2 ]; [ "$ROOT_MTD_SIZE" -eq 8388608 ]; [ "$ROOT_MTD_ERASE_SIZE" -eq 65536 ]; [ "$OVERLAY_MTD" = mtd3 ]; [ "$OVERLAY_MTD_SIZE" -eq 5242880 ]; check_full_mtd_layout; [ "$LOADER_MTD" = mtd0 ]; [ "$LOADER_MTD_SIZE" -eq 262144 ]; [ "$KERNEL_MTD" = mtd1 ]; [ "$KERNEL_MTD_SIZE" -eq 2883584 ]' sh "$PKG/files/common.sh"
 
+printf 'console=ttyS0 postmerkos.live=1 root=/dev/ram0\n' > "$TMP/cmdline-live"
+printf 'console=ttyS0 root=/dev/mtdblock2\n' > "$TMP/cmdline-flash"
+FWUPDATE_PROC_CMDLINE="$TMP/cmdline-live" FWUPDATE_LIVE_MARKER="$TMP/no-marker" \
+FWUPDATE_MANIFEST_HELPER="$OUT" FWUPDATE_STATUS_FILE="$TMP/status.json" \
+FWUPDATE_LOG_FILE="$TMP/update.log" FWUPDATE_UPLOAD_DIR="$TMP/uploads" \
+sh -c '. "$1"; is_live_boot' sh "$PKG/files/common.sh"
+if FWUPDATE_PROC_CMDLINE="$TMP/cmdline-flash" FWUPDATE_LIVE_MARKER="$TMP/no-marker" \
+  FWUPDATE_MANIFEST_HELPER="$OUT" FWUPDATE_STATUS_FILE="$TMP/status.json" \
+  FWUPDATE_LOG_FILE="$TMP/update.log" FWUPDATE_UPLOAD_DIR="$TMP/uploads" \
+  sh -c '. "$1"; is_live_boot' sh "$PKG/files/common.sh"; then
+  echo 'normal flash boot was incorrectly detected as PMOSLIVE' >&2
+  exit 1
+fi
+
 cc -std=c99 -Wall -Wextra -Werror -o "$TMP/fwflash" "$PKG/fwflash.c"
 "$TMP/fwflash" --help | grep -q -- '--factory-reset'
 "$TMP/fwflash" --help | grep -q -- '--overlay-only'
@@ -140,7 +154,17 @@ assert '--status-led-green' in script and '--status-led-orange' in script
 assert 'factory_reset_operation = true' in helper
 assert 'if (factory_reset_operation)' in helper
 assert 'Factory-default overlay verified' in helper
+assert "is_live_boot && fw_die 'factory reset is disabled while running from PMOSLIVE'" in script
 PY_RESET_CONTRACT
+
+python3 - "$PKG/files/fw_update" <<'PY_LIVE_UPDATE_CONTRACT'
+from pathlib import Path
+import sys
+script=Path(sys.argv[1]).read_text()
+assert 'if is_live_boot' in script
+assert 'VERIFY_ONLY' in script and 'DRY_RUN' in script
+assert 'flash writes are disabled while running from PMOSLIVE' in script
+PY_LIVE_UPDATE_CONTRACT
 
 # A button-triggered reset owns the reset indicator before entering the factory
 # reset script.  If an updater wins the common lock race, cleanup must adopt and

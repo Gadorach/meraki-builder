@@ -96,7 +96,7 @@ data = bytearray(Path(image).read_bytes())
 cursor = 0x100
 for marker in (
     b'PMOSRAM READY 2', b'PMOSBOOT MENU-PROBE',
-    b'PMOSBOOT MENU 1=UART-RAMLOADER 2=FW-RECOVERY',
+    b'PMOSBOOT MENU 1=UART-RAMLOADER 2=FW-RECOVERY 3=LIVEBOOT',
 ):
     data[cursor:cursor + len(marker)] = marker
     cursor += len(marker) + 16

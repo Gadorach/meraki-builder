@@ -160,6 +160,7 @@ export MS42P_LOADER="$LOADER_ARTIFACT"
 export MS42P_LOADER_MANIFEST="$LOADER_MANIFEST"
 export MS42P_PAYLOAD_PACKER="$LOADER_PAYLOAD_PACKER"
 export MS42P_RECOVERY_ARTIFACT_DIR="$RECOVERY_ARTIFACT_DIR"
+export MS42P_LIVEBOOT_ARTIFACT_DIR="$LIVEBOOT_ARTIFACT_DIR"
 export MS42P_RELEASE="${MS42P_RELEASE:-$(date -u +%Y%m%d)}"
 run_logged buildroot-build \
   make -j"$JOBS" BR2_DL_DIR="$BUILDROOT_DL_DIR" \
@@ -193,6 +194,7 @@ if [[ -f "$release_manifest" ]]; then
     "$ARTIFACTS_DIR/rootfs.squashfs" \
     "$LOADER_MANIFEST" \
     "$RECOVERY_ARTIFACT_DIR" \
+    "$LIVEBOOT_ARTIFACT_DIR" \
     "$LOADER_SOURCE_VERSION_FILE" \
     "$LOADER_SOURCE_REVISION_FILE"
   write_sha256_sidecar "$ARTIFACTS_DIR/$name.manifest.json"

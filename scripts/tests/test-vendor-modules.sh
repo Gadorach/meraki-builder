@@ -73,15 +73,17 @@ cp -a "$DEST2" "$BOARD/vendor-modules"
 # Supply the source-owned loader and recovery capability records required by
 # the authoritative post-build release manifest path.
 RECOVERY="$TMP/recovery"
+LIVEBOOT="$TMP/liveboot"
 LOADER_MANIFEST="$TMP/loader.manifest.json"
-mkdir -p "$RECOVERY"
-python3 - "$LOADER_MANIFEST" "$RECOVERY" <<'PY_RECOVERY_FIXTURE'
+mkdir -p "$RECOVERY" "$LIVEBOOT"
+python3 - "$LOADER_MANIFEST" "$RECOVERY" "$LIVEBOOT" <<'PY_RECOVERY_FIXTURE'
 import hashlib
 import json
 from pathlib import Path
 import sys
-loader_manifest, recovery_raw = sys.argv[1:]
+loader_manifest, recovery_raw, liveboot_raw = sys.argv[1:]
 recovery = Path(recovery_raw)
+liveboot = Path(liveboot_raw)
 targets = {
     "luton26": {
         "id": 1, "spi": 0x70000064,
@@ -112,7 +114,7 @@ for family, target in targets.items():
     digest = hashlib.sha256(raw).hexdigest()
     embedded[family] = {
         "path": str(payload), "size": len(raw), "sha256": digest,
-        "load_address": 0x81000000, "entry_address": 0x81000000,
+        "load_address": 0x86C00000, "entry_address": 0x86C00000,
         "entry_contract": "flat-binary-byte-zero-v1",
         "manifest_lookup_contract": "direct-object-members-v1",
         "hardware_preflight_contract": "spi-nor-scratch-rw-restore-loader-crc-v4",
@@ -132,8 +134,8 @@ for family, target in targets.items():
         "operations": ["verify", "preflight", "dry-run", "flash"],
         "transport_integrity": ["frame-crc32", "compact-ack-crc32", "object-crc32", "object-sha256", "reconstructed-image-sha256"],
         "adaptive_transport_contract": "pmosrec-v3-adaptive-uart-sparse-lz4-v1",
-        "load_address": 0x81000000,
-        "entry_address": 0x81000000,
+        "load_address": 0x86C00000,
+        "entry_address": 0x86C00000,
         "entry_contract": "flat-binary-byte-zero-v1",
         "manifest_lookup_contract": "direct-object-members-v1",
         "hardware_preflight_contract": "spi-nor-scratch-rw-restore-loader-crc-v4",
@@ -148,6 +150,45 @@ for family, target in targets.items():
     (recovery / f"recovery-{family}.descriptor.json").write_text(
         json.dumps(descriptor, indent=2, sort_keys=True) + "\n"
     )
+
+live_marker = (
+    b"PMOSLIVE3;SOC=jaguar1;FAMILY=2;PROTO=3;FLASH=0;LIVEBOOT=1;"
+    b"IMAGE_BYTES=16777216;KERNEL=81000000;ROOTFS=87000000;MEM_MIB=120;"
+    b"FRAME_MAX=4096;WINDOW_MAX=16;SPARSE=1;LZ4=1;END"
+)
+live_payload = liveboot / "pmoslive-jaguar1.bin"
+live_payload.write_bytes(b"module-test-live\0" + live_marker + b"\0")
+live_digest = hashlib.sha256(live_payload.read_bytes()).hexdigest()
+live_ram = {
+    "kernel_load_address": 0x81000000,
+    "image_staging_address": 0x81400000,
+    "manifest_address": 0x82400000,
+    "payload_address": 0x86C00000,
+    "squashfs_address": 0x87000000,
+    "boot_params_physical_address": 0x00000400,
+    "boot_params_uncached_address": 0xA0000400,
+    "boot_params_bytes": 0x00000C00,
+    "linux_memory_mib": 120,
+    "top_reserved_mib": 8,
+}
+(liveboot / "pmoslive-jaguar1.descriptor.json").write_text(json.dumps({
+    "format": "postmerkos.uart-liveboot-payload.v1",
+    "protocol_version": 3,
+    "soc_family": "jaguar1",
+    "soc_family_id": 2,
+    "accepted_models": ["MS42", "MS42P"],
+    "operations": ["verify", "dry-run", "liveboot"],
+    "flash_access": "none",
+    "load_address": 0x86C00000,
+    "entry_address": 0x86C00000,
+    "entry_contract": "flat-binary-byte-zero-v1",
+    "transport_contract": "pmosrec-v3-adaptive-uart-sparse-lz4-v1",
+    "image": {"bytes": 0x1000000, "kernel_offset": 0x40000, "squashfs_offset": 0x300000},
+    "ram_layout": live_ram,
+    "linux_handoff": "mips-legacy-argc-argv-envp-external-initrd-v1",
+    "rootfs_handoff": "squashfs-as-legacy-initrd-v1",
+    "binary": {"filename": live_payload.name, "bytes": live_payload.stat().st_size, "sha256": live_digest},
+}, indent=2, sort_keys=True) + "\n")
 Path(loader_manifest).write_text(json.dumps({
     "format": "postmerkos.vcoreiii-linuxloader-build.v7",
     "variant": "development",
@@ -172,17 +213,34 @@ Path(loader_manifest).write_text(json.dumps({
         "boot_menu": {
             "probe_timeout_ms": 3000,
             "selection_timeout_ms": 5000,
-            "options": {"1": "uart-ramloader", "2": "embedded-firmware-recovery"},
+            "options": {"1": "uart-ramloader", "2": "embedded-firmware-recovery", "3": "embedded-liveboot"},
             "noise_behavior": "invalid/no explicit option continues normal boot",
         },
         "image_check_diagnostics": "structured-pass-warn-fail-skip-values-v1",
+        "stage1_flash_offset": 0x00020000,
+        "stage1_storage_contract": "single-shared-boot-region-blob-v1",
         "embedded_recovery": embedded,
+        "embedded_liveboot": {"jaguar1": {
+            "path": str(live_payload), "size": live_payload.stat().st_size, "sha256": live_digest,
+            "load_address": 0x86C00000, "entry_address": 0x86C00000,
+            "entry_contract": "flat-binary-byte-zero-v1", "flash_access": "none",
+            "accepted_models": ["MS42", "MS42P"],
+            "transport_contract": "pmosrec-v3-adaptive-uart-sparse-lz4-v1",
+            "linux_handoff": "mips-legacy-argc-argv-envp-external-initrd-v1",
+            "rootfs_handoff": "squashfs-as-legacy-initrd-v1",
+            "kernel_load_address": 0x81000000, "squashfs_address": 0x87000000,
+            "boot_params_physical_address": 0x00000400,
+            "boot_params_uncached_address": 0xA0000400,
+            "boot_params_bytes": 0x00000C00,
+            "linux_memory_mib": 120, "top_reserved_mib": 8,
+        }},
     },
 }, indent=2, sort_keys=True) + "\n")
 PY_RECOVERY_FIXTURE
 TARGET_DIR="$TMP/target" POSTMERKOS_RELEASE=test \
   MS42P_LOADER_MANIFEST="$LOADER_MANIFEST" \
   MS42P_RECOVERY_ARTIFACT_DIR="$RECOVERY" \
+  MS42P_LIVEBOOT_ARTIFACT_DIR="$LIVEBOOT" \
   "$BOARD/post-build.sh"
 python3 "$MODULE_TOOL" verify "$TMP/target/lib/modules" \
   --required-file "$REQUIRED_FILE" --quiet

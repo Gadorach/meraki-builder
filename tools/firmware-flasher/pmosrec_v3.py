@@ -45,6 +45,7 @@ MAX_WINDOW = 16
 BAUD_TEST_BYTES = 32 * 1024
 BAUD_TEST_PASSES = 2
 BOOT_BAUD = 115200
+FLAG_LIVE_BOOT = 8
 BOOT_BANNER_PREFIXES = (
     "LinuxLoader built",
     "init_pll ok",
@@ -855,6 +856,27 @@ def make_package_header(bundle: BundleInfo, image_plan: RepresentationPlan,
     return raw[:-4] + struct.pack("<I", zlib.crc32(raw[:-4]) & 0xFFFFFFFF)
 
 
+def make_live_package_header(bundle: BundleInfo, image_plan: RepresentationPlan,
+                             manifest_plan: RepresentationPlan, window_size: int,
+                             *, dry_run: bool, force: bool) -> bytes:
+    """Build the PMOSREC-v3-compatible header used by PMOSLIVE."""
+    flags = FLAG_LIVE_BOOT | (2 if dry_run else 0) | (4 if force else 0)
+    model = bundle.model.encode("ascii")
+    if len(model) > 15:
+        raise ProtocolError("target model does not fit the PMOSLIVE v3 header")
+    if bundle.family != "jaguar1" or bundle.model not in {"MS42", "MS42P"}:
+        raise ProtocolError("PMOSLIVE currently accepts only MS42/MS42P Jaguar1 images")
+    fields = (
+        PACKAGE_MAGIC, PROTOCOL_VERSION, flags, 2, FULL_IMAGE_SIZE, len(bundle.manifest_bytes),
+        image_plan.frame_size, window_size, image_plan.mode, len(image_plan.frames),
+        len(manifest_plan.frames), image_plan.wire_bytes, bundle.manifest_crc32,
+        bundle.image_crc32, bundle.image_sha256, bundle.manifest_sha256,
+        model.ljust(16, b"\0"), 0,
+    )
+    raw = PACKAGE_HEADER.pack(*fields)
+    return raw[:-4] + struct.pack("<I", zlib.crc32(raw[:-4]) & 0xFFFFFFFF)
+
+
 
 FLASH_PROGRESS_RE = re.compile(r"^PMOSREC PROGRESS (ERASE|PROGRAM|VERIFY) ([0-9a-fA-F]{8})$")
 FLASH_BEGIN_RE = re.compile(r"^PMOSREC PROGRESS (ERASE|PROGRAM|VERIFY)-BEGIN$")
@@ -906,6 +928,84 @@ def wait_for_flash_success(link: SerialLink, operation_timeout: float) -> str:
         if ended:
             phase = ended.group(1)
             print(f"[flasher] {labels[phase]}: 100% complete", flush=True)
+
+def send_liveboot_v3(link: SerialLink, bundle: BundleInfo, selection: TransportSelection,
+                     *, dry_run: bool, force: bool, auto_confirm: bool = True,
+                     verbose_acks: bool = False,
+                     manual_input: Callable[[str], str] = input,
+                     baud_controller: BaudController | None = None,
+                     boot_timeout: float = 120.0) -> str:
+    image_plan = choose_representation(bundle.image, selection)
+    manifest_plan = make_manifest_plan(bundle.manifest_bytes, selection.frame_size)
+    header = make_live_package_header(
+        bundle, image_plan, manifest_plan, selection.window_size,
+        dry_run=dry_run, force=force,
+    )
+    link.write_all(b"PMOS3 LIVEBOOT\n")
+    link.wait_for(("PMOS3 LIVEBOOT-READY",), 3.0)
+    link.write_all(header)
+    link.wait_for(("PMOS3 LIVEBOOT-HEADER-ACK ",), 5.0)
+
+    send_frames(
+        link, manifest_plan.frames, OBJECT_MANIFEST, selection.window_size,
+        baud=selection.baud, label="Manifest upload", verbose_acks=verbose_acks,
+    )
+    link.wait_for(("PMOS3 MANIFEST-OBJECT-VERIFIED",), 10.0)
+    link.wait_for(("PMOS3 MANIFEST-ACCEPTED",), 10.0)
+    send_frames(
+        link, image_plan.frames, OBJECT_IMAGE, selection.window_size,
+        baud=selection.baud, label="Retail image upload", verbose_acks=verbose_acks,
+    )
+    link.wait_for(("PMOS3 IMAGE-OBJECT-VERIFIED",), 30.0)
+    link.wait_for(("PMOSLIVE SPIM-VERIFIED ",), 15.0)
+    link.wait_for(("PMOSLIVE SQUASHFS-VERIFIED ",), 15.0)
+    link.wait_for(("PMOSLIVE RESULT IMAGE-READY",), 15.0)
+    if dry_run:
+        return link.wait_for(("PMOSLIVE RESULT DRY-RUN-OK",), 15.0)
+
+    challenge_line = link.wait_for(("PMOSLIVE BOOT-CHALLENGE ",), 15.0)
+    match = re.fullmatch(r"PMOSLIVE BOOT-CHALLENGE ([0-9a-fA-F]{8})", challenge_line)
+    if not match:
+        raise ProtocolError(f"invalid PMOSLIVE boot challenge: {challenge_line}")
+    nonce = match.group(1).lower()
+    link.wait_for(("PMOSLIVE CONFIRMATION-WAIT ",), 5.0)
+    expected = f"BOOTRAM {nonce}"
+    if auto_confirm:
+        print(f"[liveboot] Sending non-destructive target confirmation: {expected}", flush=True)
+        link.write_all((expected + "\n").encode("ascii"))
+    else:
+        while True:
+            entered = manual_input(
+                f"Enter the complete command and challenge ({expected}), or power-cycle to cancel: "
+            ).strip()
+            link.write_all((entered + "\n").encode("ascii"))
+            response = link.wait_for(
+                ("PMOSLIVE CONFIRMATION-ACK", "PMOSLIVE CONFIRMATION-REJECTED "), 10.0
+            )
+            if response == "PMOSLIVE CONFIRMATION-ACK":
+                break
+            print(f"[liveboot] Incorrect confirmation. Required: {expected}.", flush=True)
+    if auto_confirm:
+        link.wait_for(("PMOSLIVE CONFIRMATION-ACK",), 5.0)
+
+    link.wait_for(("PMOSLIVE BOOT-PLAN ",), 10.0)
+    restore = link.wait_for(("PMOSLIVE UART-RESTORE RATE=115200 ",), 5.0)
+    print(f"[liveboot] {restore}", flush=True)
+    if baud_controller is not None:
+        baud_controller.set_rate(BOOT_BAUD, flush=True)
+        buffer = getattr(link, "buffer", None)
+        if isinstance(buffer, bytearray):
+            buffer.clear()
+    link.wait_for(("PMOSLIVE UART-BASELINE-READY RATE=115200",), 5.0)
+    exec_line = link.wait_for(("PMOSLIVE EXEC ENTRY=",), 5.0)
+    print(f"[liveboot] {exec_line}", flush=True)
+    try:
+        banner = link.wait_for(BOOT_BANNER_PREFIXES, boot_timeout)
+        print(f"[liveboot] Linux boot output detected: {banner}", flush=True)
+        return banner
+    except ProtocolError:
+        return exec_line
+
 
 def send_package_v3(link: SerialLink, bundle: BundleInfo, selection: TransportSelection,
                     *, dry_run: bool, force: bool, auto_confirm: bool,

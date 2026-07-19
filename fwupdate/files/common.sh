@@ -34,9 +34,17 @@ FWUPDATE_MANIFEST_HELPER=${FWUPDATE_MANIFEST_HELPER:-/usr/libexec/fwupdate/fwman
 FWUPDATE_PROC_MTD=${FWUPDATE_PROC_MTD:-/proc/mtd}
 FWUPDATE_FSTAB=${FWUPDATE_FSTAB:-/etc/fstab}
 FWUPDATE_DEV_ROOT=${FWUPDATE_DEV_ROOT:-/dev}
+FWUPDATE_PROC_CMDLINE=${FWUPDATE_PROC_CMDLINE:-/proc/cmdline}
+FWUPDATE_LIVE_MARKER=${FWUPDATE_LIVE_MARKER:-/run/postmerkos/live-mode}
 
 mkdir -p /run/fwupdate "$FWUPDATE_UPLOAD_DIR" 2>/dev/null || true
 chmod 700 "$FWUPDATE_UPLOAD_DIR" 2>/dev/null || true
+
+is_live_boot() {
+    [ -e "$FWUPDATE_LIVE_MARKER" ] && return 0
+    [ -r "$FWUPDATE_PROC_CMDLINE" ] || return 1
+    grep -Eq '(^|[[:space:]])postmerkos\.live=1([[:space:]]|$)' "$FWUPDATE_PROC_CMDLINE" 2>/dev/null
+}
 
 ts() { date +%s 2>/dev/null || echo 0; }
 

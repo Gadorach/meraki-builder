@@ -211,6 +211,31 @@ class PMOSRECv3Tests(unittest.TestCase):
         self.assertEqual(fields[7], 8)
         self.assertEqual(fields[-1], zlib.crc32(raw[:-4]) & 0xFFFFFFFF)
 
+    def test_live_package_header_is_non_flash_and_crc_bound(self) -> None:
+        class Bundle:
+            model = "MS42P"
+            family = "jaguar1"
+            manifest_bytes = b"{}"
+            manifest_crc32 = zlib.crc32(manifest_bytes) & 0xFFFFFFFF
+            image_crc32 = 0x12345678
+            image_sha256 = hashlib.sha256(b"image").digest()
+            manifest_sha256 = hashlib.sha256(manifest_bytes).digest()
+
+        image_plan = p3.RepresentationPlan(p3.REP_RAW, 4096, (
+            p3.EncodedFrame(0, 0, 1, 0, b"x", zlib.crc32(b"x") & 0xFFFFFFFF),
+        ))
+        manifest_plan = p3.make_manifest_plan(Bundle.manifest_bytes, 4096)
+        raw = p3.make_live_package_header(
+            Bundle, image_plan, manifest_plan, 1, dry_run=False, force=False
+        )
+        fields = p3.PACKAGE_HEADER.unpack(raw)
+        flags = fields[2]
+        self.assertEqual(fields[0], p3.PACKAGE_MAGIC)
+        self.assertEqual(fields[1], 3)
+        self.assertTrue(flags & p3.FLAG_LIVE_BOOT)
+        self.assertFalse(flags & 1)
+        self.assertEqual(fields[-1], zlib.crc32(raw[:-4]) & 0xFFFFFFFF)
+
     def test_flash_phase_progress_and_success_are_rendered(self) -> None:
         link = FakeLineLink([
             "PMOSREC PROGRESS ERASE-BEGIN",

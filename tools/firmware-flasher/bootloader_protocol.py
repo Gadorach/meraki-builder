@@ -37,6 +37,9 @@ LOADER_REGION_SIZE = 0x40000
 KERNEL_OFFSET = 0x40000
 ROOTFS_OFFSET = 0x300000
 KERNEL_REGION_SIZE = ROOTFS_OFFSET - KERNEL_OFFSET
+ROOTFS_REGION_SIZE = 0x800000
+SQUASHFS_SUPERBLOCK_BYTES = 96
+SQUASHFS_MAJOR = 4
 SPIM_MAGIC = 0x4D495053
 SPIM_HEADER = struct.Struct("<8I")
 SPIM_ALIGNMENT = 32
@@ -161,8 +164,8 @@ def inspect_payload(path: Path, descriptor_path: Path | None = None) -> PayloadD
     hardware_preflight_contract = metadata.get("hardware_preflight_contract")
     spi_master_enable_contract = metadata.get("spi_master_enable_contract")
     adaptive_transport_contract = metadata.get("adaptive_transport_contract")
-    if load_address != 0x81000000 or entry_address != 0x81000000:
-        raise ProtocolError("recovery payload is not linked for load/entry address 0x81000000")
+    if load_address != 0x86C00000 or entry_address != 0x86C00000:
+        raise ProtocolError("recovery payload is not linked for high-memory load/entry address 0x86c00000")
     if entry_contract != "flat-binary-byte-zero-v1":
         raise ProtocolError(
             "recovery payload lacks the flat-binary-byte-zero-v1 entry contract; "
@@ -214,17 +217,23 @@ def _validate_loader_capability(manifest: dict, loader_sha256: str, family: str)
     if loader.get("build_manifest_format") != "postmerkos.vcoreiii-linuxloader-build.v7":
         raise ProtocolError("firmware loader is not a meraki-redboot v0.7 source build")
     menu = loader.get("boot_menu")
-    expected_options = {"1": "uart-ramloader", "2": "embedded-firmware-recovery"}
+    expected_options = {
+        "1": "uart-ramloader",
+        "2": "embedded-firmware-recovery",
+        "3": "embedded-liveboot",
+    }
     if not isinstance(menu, dict) or menu.get("options") != expected_options:
         raise ProtocolError("firmware loader does not expose the meraki-redboot recovery menu")
     if loader.get("image_check_diagnostics") != "structured-pass-warn-fail-skip-values-v1":
         raise ProtocolError("firmware loader does not declare structured image diagnostics")
+    if loader.get("stage1_flash_offset") != 0x00020000 or loader.get("stage1_storage_contract") != "single-shared-boot-region-blob-v1":
+        raise ProtocolError("firmware loader does not declare the shared stage-1 boot-region contract")
     embedded = loader.get("embedded_recovery")
     record = embedded.get(family) if isinstance(embedded, dict) else None
     if not isinstance(record, dict) or not re.fullmatch(r"[0-9a-fA-F]{64}", str(record.get("sha256", ""))):
         raise ProtocolError(f"firmware loader does not bind an embedded recovery payload for {family}")
-    if record.get("load_address") != 0x81000000 or record.get("entry_address") != 0x81000000:
-        raise ProtocolError("firmware loader embedded recovery has an invalid load/entry address")
+    if record.get("load_address") != 0x86C00000 or record.get("entry_address") != 0x86C00000:
+        raise ProtocolError("firmware loader embedded recovery has an invalid high-memory load/entry address")
     if record.get("entry_contract") != "flat-binary-byte-zero-v1":
         raise ProtocolError(
             "firmware image contains the affected v0.7.0 recovery layout; rebuild meraki-redboot "
@@ -245,6 +254,36 @@ def _validate_loader_capability(manifest: dict, loader_sha256: str, family: str)
         raise ProtocolError(
             "firmware image contains a recovery payload without the SPI master-enable handoff correction"
         )
+    live = loader.get("embedded_liveboot")
+    live_record = live.get("jaguar1") if isinstance(live, dict) else None
+    if not isinstance(live_record, dict):
+        raise ProtocolError("firmware loader does not bind an embedded Jaguar1 PMOSLIVE payload")
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", str(live_record.get("sha256", ""))):
+        raise ProtocolError("firmware loader PMOSLIVE binding has an invalid SHA-256")
+    if live_record.get("load_address") != 0x86C00000 or live_record.get("entry_address") != 0x86C00000:
+        raise ProtocolError("firmware loader PMOSLIVE payload is not linked at 0x86c00000")
+    if live_record.get("entry_contract") != "flat-binary-byte-zero-v1":
+        raise ProtocolError("firmware loader PMOSLIVE payload lacks the byte-zero entry contract")
+    if live_record.get("flash_access") != "none":
+        raise ProtocolError("firmware loader PMOSLIVE payload is not declared flash-write-free")
+    if live_record.get("accepted_models") != ["MS42", "MS42P"]:
+        raise ProtocolError("firmware loader PMOSLIVE target allow-list is incompatible")
+    if live_record.get("transport_contract") != "pmosrec-v3-adaptive-uart-sparse-lz4-v1":
+        raise ProtocolError("firmware loader PMOSLIVE transport contract is incompatible")
+    if live_record.get("linux_handoff") != "mips-legacy-argc-argv-envp-external-initrd-v1":
+        raise ProtocolError("firmware loader PMOSLIVE Linux handoff contract is incompatible")
+    if live_record.get("rootfs_handoff") != "squashfs-as-legacy-initrd-v1":
+        raise ProtocolError("firmware loader PMOSLIVE rootfs handoff contract is incompatible")
+    if live_record.get("kernel_load_address") != 0x81000000 or live_record.get("squashfs_address") != 0x87000000:
+        raise ProtocolError("firmware loader PMOSLIVE RAM layout is incompatible")
+    if (
+        live_record.get("boot_params_physical_address") != 0x00000400
+        or live_record.get("boot_params_uncached_address") != 0xA0000400
+        or live_record.get("boot_params_bytes") != 0x00000C00
+    ):
+        raise ProtocolError("firmware loader PMOSLIVE boot-parameter workspace is incompatible")
+    if live_record.get("linux_memory_mib") != 120 or live_record.get("top_reserved_mib") != 8:
+        raise ProtocolError("firmware loader PMOSLIVE memory reservation is incompatible")
 
 
 def validate_spim_kernel(image: Path, artifact: dict | None = None) -> dict[str, int | str]:
@@ -297,6 +336,47 @@ def validate_spim_kernel(image: Path, artifact: dict | None = None) -> dict[str,
         if record.get("alignment_bytes") != SPIM_ALIGNMENT or record.get("header_bytes") != SPIM_HEADER.size:
             raise ProtocolError("manifest kernel_payload geometry is incompatible")
     return result
+
+
+def validate_squashfs_rootfs(image: Path, artifact: dict | None = None) -> dict[str, int | str]:
+    with image.open("rb") as stream:
+        stream.seek(ROOTFS_OFFSET)
+        superblock = stream.read(SQUASHFS_SUPERBLOCK_BYTES)
+        if len(superblock) != SQUASHFS_SUPERBLOCK_BYTES:
+            raise ProtocolError("image is too short for the SquashFS superblock")
+        if superblock[:4] != b"hsqs":
+            raise ProtocolError("image rootfs region is missing the SquashFS header")
+        major = struct.unpack_from("<H", superblock, 28)[0]
+        bytes_used = struct.unpack_from("<Q", superblock, 40)[0]
+        if major != SQUASHFS_MAJOR:
+            raise ProtocolError(f"SquashFS major version {major} is incompatible; expected 4")
+        if not SQUASHFS_SUPERBLOCK_BYTES <= bytes_used <= ROOTFS_REGION_SIZE:
+            raise ProtocolError("SquashFS bytes_used is outside the retail rootfs region")
+
+        payload_bytes = int(bytes_used)
+        expected_sha = None
+        if artifact is not None:
+            declared = artifact.get("rootfs_bytes")
+            if not isinstance(declared, int) or not bytes_used <= declared <= ROOTFS_REGION_SIZE:
+                raise ProtocolError("manifest rootfs_bytes is incompatible with the SquashFS superblock")
+            payload_bytes = declared
+            expected_sha = str(artifact.get("rootfs_sha256", "")).lower()
+            if len(expected_sha) != 64:
+                raise ProtocolError("manifest rootfs_sha256 is missing or invalid")
+        stream.seek(ROOTFS_OFFSET)
+        payload = stream.read(payload_bytes)
+        if len(payload) != payload_bytes:
+            raise ProtocolError("image SquashFS payload is truncated")
+
+    digest = hashlib.sha256(payload).hexdigest()
+    if expected_sha is not None and digest != expected_sha:
+        raise ProtocolError("manifest rootfs SHA-256 does not match the image")
+    return {
+        "major": major,
+        "bytes_used": int(bytes_used),
+        "payload_bytes": payload_bytes,
+        "sha256": digest,
+    }
 
 
 
@@ -352,8 +432,8 @@ def _recovery_payload_record(manifest: dict, family: str, model: str) -> dict:
         raise ProtocolError("manifest recovery payload size is invalid")
     if not re.fullmatch(r"[0-9a-fA-F]{64}", str(record.get("sha256", ""))):
         raise ProtocolError("manifest recovery payload SHA-256 is invalid")
-    if record.get("load_address") != 0x81000000 or record.get("entry_address") != 0x81000000:
-        raise ProtocolError("manifest recovery payload load/entry address is invalid")
+    if record.get("load_address") != 0x86C00000 or record.get("entry_address") != 0x86C00000:
+        raise ProtocolError("manifest recovery payload high-memory load/entry address is invalid")
     if record.get("entry_contract") != "flat-binary-byte-zero-v1":
         raise ProtocolError("manifest recovery payload lacks the corrected byte-zero entry contract")
     if record.get("manifest_lookup_contract") != "direct-object-members-v1":
@@ -365,6 +445,91 @@ def _recovery_payload_record(manifest: dict, family: str, model: str) -> dict:
     if record.get("adaptive_transport_contract") != "pmosrec-v3-adaptive-uart-sparse-lz4-v1":
         raise ProtocolError("manifest recovery payload lacks PMOSREC v3 adaptive transport")
     return record
+
+
+def _liveboot_payload_record(manifest: dict, model: str) -> dict:
+    recovery = manifest.get("recovery")
+    if not isinstance(recovery, dict):
+        raise ProtocolError("manifest does not contain recovery metadata")
+    liveboot = recovery.get("uart_liveboot")
+    if not isinstance(liveboot, dict) or liveboot.get("enabled") is not True:
+        raise ProtocolError("manifest does not enable UART live boot")
+    if liveboot.get("protocol_version") != RECOVERY_PROTOCOL_VERSION:
+        raise ProtocolError("manifest UART liveboot protocol is incompatible")
+    if liveboot.get("full_image_bytes") != FULL_IMAGE_SIZE:
+        raise ProtocolError("manifest UART liveboot image size is incompatible")
+    if liveboot.get("operations") != ["verify", "dry-run", "liveboot"]:
+        raise ProtocolError("manifest UART liveboot operation contract is incompatible")
+    if liveboot.get("flash_access") != "none":
+        raise ProtocolError("manifest UART liveboot is not declared flash-write-free")
+    if liveboot.get("delivery") != "meraki-redboot-stage1-menu-option-3":
+        raise ProtocolError("manifest UART liveboot embedded delivery contract is incompatible")
+    if liveboot.get("legacy_delivery") != "meraki-redboot-stage1-menu-option-1-ram-upload":
+        raise ProtocolError("manifest UART liveboot RAM-upload delivery contract is incompatible")
+    if liveboot.get("transport_contract") != "pmosrec-v3-adaptive-uart-sparse-lz4-v1":
+        raise ProtocolError("manifest UART liveboot transport contract is incompatible")
+    expected_integrity = [
+        "frame-crc32", "compact-ack-crc32", "object-crc32",
+        "object-sha256", "reconstructed-image-sha256",
+    ]
+    if liveboot.get("transport_integrity") != expected_integrity:
+        raise ProtocolError("manifest UART liveboot integrity contract is incompatible")
+    if liveboot.get("linux_handoff") != "mips-legacy-argc-argv-envp-external-initrd-v1":
+        raise ProtocolError("manifest UART liveboot Linux handoff is incompatible")
+    if liveboot.get("rootfs_handoff") != "squashfs-as-legacy-initrd-v1":
+        raise ProtocolError("manifest UART liveboot rootfs handoff is incompatible")
+    payloads = liveboot.get("payloads")
+    record = payloads.get("jaguar1") if isinstance(payloads, dict) else None
+    if not isinstance(record, dict):
+        raise ProtocolError("manifest has no Jaguar1 PMOSLIVE payload record")
+    if record.get("soc_family_id") != 2:
+        raise ProtocolError("manifest PMOSLIVE family ID is incompatible")
+    accepted_models = record.get("accepted_models")
+    if accepted_models != ["MS42", "MS42P"] or model not in accepted_models:
+        raise ProtocolError(f"manifest PMOSLIVE payload does not accept {model}")
+    if not isinstance(record.get("bytes"), int) or not 0 < record["bytes"] <= 4 * 1024 * 1024:
+        raise ProtocolError("manifest PMOSLIVE payload size is invalid")
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", str(record.get("sha256", ""))):
+        raise ProtocolError("manifest PMOSLIVE payload SHA-256 is invalid")
+    if record.get("load_address") != 0x86C00000 or record.get("entry_address") != 0x86C00000:
+        raise ProtocolError("manifest PMOSLIVE high-memory load/entry address is invalid")
+    if record.get("entry_contract") != "flat-binary-byte-zero-v1":
+        raise ProtocolError("manifest PMOSLIVE entry contract is incompatible")
+    if record.get("flash_access") != "none":
+        raise ProtocolError("manifest PMOSLIVE payload is not flash-write-free")
+    if record.get("transport_contract") != "pmosrec-v3-adaptive-uart-sparse-lz4-v1":
+        raise ProtocolError("manifest PMOSLIVE payload transport contract is incompatible")
+    if record.get("linux_handoff") != "mips-legacy-argc-argv-envp-external-initrd-v1":
+        raise ProtocolError("manifest PMOSLIVE payload Linux handoff is incompatible")
+    if record.get("rootfs_handoff") != "squashfs-as-legacy-initrd-v1":
+        raise ProtocolError("manifest PMOSLIVE payload rootfs handoff is incompatible")
+    expected_ram = {
+        "kernel_load_address": 0x81000000,
+        "image_staging_address": 0x81400000,
+        "manifest_address": 0x82400000,
+        "payload_address": 0x86C00000,
+        "squashfs_address": 0x87000000,
+        "boot_params_physical_address": 0x00000400,
+        "boot_params_uncached_address": 0xA0000400,
+        "boot_params_bytes": 0x00000C00,
+        "linux_memory_mib": 120,
+        "top_reserved_mib": 8,
+    }
+    if record.get("ram_layout") != expected_ram:
+        raise ProtocolError("manifest PMOSLIVE RAM layout is incompatible")
+    return record
+
+
+def validate_live_payload_binding(size: int, sha256: str, bundle: BundleInfo) -> None:
+    try:
+        manifest = json.loads(bundle.manifest_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ProtocolError(f"invalid release manifest: {exc}") from exc
+    record = _liveboot_payload_record(manifest, bundle.model)
+    if size != record["bytes"]:
+        raise ProtocolError("PMOSLIVE payload size does not match the release manifest")
+    if sha256.lower() != str(record["sha256"]).lower():
+        raise ProtocolError("PMOSLIVE payload SHA-256 does not match the release manifest")
 
 
 def validate_recovery_payload(path: Path, descriptor: PayloadDescriptor, bundle: BundleInfo) -> None:
@@ -431,16 +596,15 @@ def validate_bundle(image: Path, manifest_path: Path, model: str, *, force: bool
         raise ProtocolError(f"{model} is untested in this artifact; force operation is required")
     with image.open("rb") as stream:
         loader = stream.read(LOADER_REGION_SIZE)
-        stream.seek(ROOTFS_OFFSET)
-        rootfs_magic = stream.read(4)
     _validate_loader_capability(manifest, hashlib.sha256(loader).hexdigest(), MODEL_FAMILY[model])
     _recovery_payload_record(manifest, MODEL_FAMILY[model], model)
-    for marker in (b"PMOSRAM READY 2", b"PMOSBOOT MENU-PROBE", b"PMOSBOOT MENU 1=UART-RAMLOADER 2=FW-RECOVERY"):
+    if model in {"MS42", "MS42P"}:
+        _liveboot_payload_record(manifest, model)
+    for marker in (b"PMOSRAM READY 2", b"PMOSBOOT MENU-PROBE", b"PMOSBOOT MENU 1=UART-RAMLOADER 2=FW-RECOVERY 3=LIVEBOOT"):
         if marker not in loader:
             raise ProtocolError(f"image bootloader region is missing meraki-redboot capability marker {marker!r}")
     validate_spim_kernel(image, artifact)
-    if rootfs_magic != b"hsqs":
-        raise ProtocolError("image rootfs region is missing the SquashFS header")
+    validate_squashfs_rootfs(image, artifact)
     return BundleInfo(
         image=image,
         manifest=manifest_path,
