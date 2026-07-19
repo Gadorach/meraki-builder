@@ -480,6 +480,7 @@ static void usage(FILE *stream) {
         "  get PATH | set PATH VALUE | set-string PATH TEXT | apply-json JSON\n"
         "  config | backup FILE | validate FILE | restore FILE | reboot\n"
         "  compatibility-needed | compatibility-report | compatibility-ack\n"
+        "  default-password-active\n"
         "  users | user-create USER PASSWORD ROLE | user-role USER ROLE | user-delete USER\n"
         "  ssh-keys | ssh-key-add LABEL KEY | ssh-key-remove KEY\n"
         "  ports-clone SOURCE TARGETS_CSV FIELDS_CSV\n"
@@ -635,6 +636,14 @@ int main(int argc, char **argv) {
       puts(string_member(data, "message", "Compatibility notice acknowledged"));
     else
       puts(json_object_to_json_string_ext(data, JSON_C_TO_STRING_PRETTY));
+    json_object_put(reply);
+    return 0;
+  }
+  if (!strcmp(command, "default-password-active")) {
+    struct json_object *reply = request("status.get", NULL);
+    struct json_object *data = reply_data(reply);
+    if (!data) { if (reply) json_object_put(reply); return 1; }
+    puts(bool_member(member(data, "security"), "default_password_active", false) ? "yes" : "no");
     json_object_put(reply);
     return 0;
   }

@@ -8,6 +8,7 @@
 #include "system_info.h"
 #include "system_identity.h"
 #include "compatibility.h"
+#include "auth.h"
 
 #include <libpostmerkos.h>
 #include <libpd690xx.h>
@@ -243,11 +244,10 @@ struct json_object *get_status(void) {
   json_object_object_add(root, "system", system_info_json());
   json_object_object_add(root, "identity", system_identity_status_json());
   struct json_object *security = json_object_new_object();
-  const char *default_marker = getenv("POSTMERKOS_DEFAULT_PASSWORD_MARKER");
-  if (!default_marker || !*default_marker)
-    default_marker = "/config/postmerkos/default-password-active";
+  /* Deterministic default-password check (root password still == device serial),
+     shared with the lightweight security.default-password RPC. */
   json_object_object_add(security, "default_password_active",
-                         json_object_new_boolean(access(default_marker, F_OK) == 0));
+                         json_object_new_boolean(auth_default_password_active()));
   const char *overlay_recovery = getenv("POSTMERKOS_OVERLAY_RECOVERY_MARKER");
   if (!overlay_recovery || !*overlay_recovery)
     overlay_recovery = "/run/postmerkos/overlay-recovery-mode";

@@ -36,6 +36,33 @@ int main(int argc, char **argv) {
   }
   assert(auth_verify_user("root", "wrong", error, sizeof(error)) != 0);
   assert(auth_verify_user("nobody", "anything", error, sizeof(error)) != 0);
+
+  /* auth_password_matches: deterministic default-password detection */
+  assert(auth_password_matches("root", "root-password"));
+  assert(!auth_password_matches("root", "wrong"));
+  assert(!auth_password_matches("root", ""));
+  assert(auth_password_matches("bob", "operator-password"));
+  assert(!auth_password_matches("nobody", "anything")); /* locked (!) hash */
+  assert(!auth_password_matches("ghost", "anything"));  /* no such account */
+
+  /* auth_default_password_active: end-to-end boardinfo SERIAL ->
+     system_info_serial() -> crypt-compare against root's hash. Exercises
+     boardinfo parsing, the CONFIGD_BOARDINFO env override, and root hash lookup. */
+  char boardinfo[600];
+  snprintf(boardinfo, sizeof(boardinfo), "%s.boardinfo", argv[3]);
+  setenv("CONFIGD_BOARDINFO", boardinfo, 1);
+  assert(!auth_default_password_active()); /* no boardinfo -> serial unavailable */
+  FILE *bi = fopen(boardinfo, "w");
+  assert(bi);
+  fprintf(bi, "MODEL=MS320-24P\nSERIAL=root-password\n"); /* serial == root's password */
+  fclose(bi);
+  assert(auth_default_password_active());   /* default (serial) password in use */
+  bi = fopen(boardinfo, "w");
+  assert(bi);
+  fprintf(bi, "SERIAL=Q2XX-CHANGED\n");     /* serial differs from root's password */
+  fclose(bi);
+  assert(!auth_default_password_active());   /* password no longer the serial */
+
   puts("authentication and role repeatability tests passed");
   return 0;
 }

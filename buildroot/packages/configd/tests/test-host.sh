@@ -43,7 +43,7 @@ cc -std=gnu11 -Wall -Wextra -Werror \
 AUTH_OUT=${TMPDIR:-/tmp}/configd-test-auth
 cc -std=gnu11 -Wall -Wextra -Werror \
   -I"$PKG" $(pkg-config --cflags json-c) \
-  -o "$AUTH_OUT" "$HERE/test_auth.c" "$PKG/auth.c" "$PKG/roles.c" \
+  -o "$AUTH_OUT" "$HERE/test_auth.c" "$PKG/auth.c" "$PKG/roles.c" "$PKG/system_info.c" \
   $(pkg-config --libs json-c) -lcrypt
 "$AUTH_OUT" "$ROLE_TMP/passwd" "$ROLE_TMP/group" "$ROLE_TMP/shadow"
 

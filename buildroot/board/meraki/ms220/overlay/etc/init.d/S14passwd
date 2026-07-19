@@ -4,6 +4,10 @@
 #
 
 start() {
+    # Retire the legacy default-password marker: default detection is now a
+    # deterministic serial-hash check in configd, so this stale flag (which older
+    # firmware left on the persistent /config overlay) is no longer read.
+    rm -f /config/postmerkos/default-password-active
     # determine if we have the default password
     password_salt=$(echo "postmerkOS" | mkpasswd -S __SALT__ -m sha256)
     # set a device specific password
@@ -12,8 +16,6 @@ start() {
         if [ -n "$serial" ]; then
             echo -e "${serial}\n${serial}" | passwd -a sha256 root >/dev/null 2>&1
             echo "Set root password to device serial number"
-            mkdir -p /config/postmerkos
-            : > /config/postmerkos/default-password-active
         fi
     fi
 }

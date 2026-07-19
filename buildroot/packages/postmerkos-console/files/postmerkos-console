@@ -1262,7 +1262,7 @@ EOF_USAGE
 }
 
 default_password_warning() {
-    [ -e /config/postmerkos/default-password-active ] || return 0
+    [ "$("$CTL" default-password-active 2>/dev/null || echo no)" = yes ] || return 0
     cat <<'EOF_PASSWORD'
 
 WARNING: The root password is still the switch serial number.

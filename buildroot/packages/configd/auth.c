@@ -1,5 +1,6 @@
 #include "auth.h"
 #include "roles.h"
+#include "system_info.h"
 
 #include <crypt.h>
 #include <errno.h>
@@ -148,6 +149,27 @@ static bool constant_time_equal(const char *left, const char *right) {
   return difference == 0;
 }
 
+bool auth_password_matches(const char *username, const char *candidate) {
+  if (!safe_username(username) || !candidate || !*candidate) return false;
+  struct account_record account;
+  if (account_by_name(username, &account) != 0) return false;
+  char hash[512];
+  if (account.password[0] && strcmp(account.password, "x") &&
+      strcmp(account.password, "*"))
+    snprintf(hash, sizeof(hash), "%s", account.password);
+  else if (shadow_hash(account.name, hash, sizeof(hash)) != 0)
+    return false;
+  if (!hash[0] || hash[0] == '!' || hash[0] == '*') return false;
+  char *calculated = crypt(candidate, hash);
+  return calculated && constant_time_equal(calculated, hash);
+}
+
+bool auth_default_password_active(void) {
+  char serial[256] = {0};
+  if (system_info_serial(serial, sizeof(serial)) != 0 || !serial[0]) return false;
+  return auth_password_matches("root", serial);
+}
+
 int auth_verify_user(const char *username, const char *password,
                      char *error, size_t error_size) {
   if (!safe_username(username) || !password) {
@@ -277,8 +299,6 @@ int auth_change_password(const char *actor, const char *target,
     return -EACCES;
   }
   rc = run_chpasswd(target, new_password, error, error_size);
-  if (rc == 0 && !strcmp(target, "root"))
-    unlink("/config/postmerkos/default-password-active");
   return rc;
 }
 

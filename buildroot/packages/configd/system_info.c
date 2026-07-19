@@ -64,6 +64,14 @@ static int read_key_value(const char *path, const char *wanted,
   return rc;
 }
 
+int system_info_serial(char *buffer, size_t size) {
+  if (!buffer || size == 0) return -EINVAL;
+  buffer[0] = '\0';
+  const char *boardinfo = env_or_default("CONFIGD_BOARDINFO",
+                                         "/run/postmerkos/boardinfo");
+  return read_key_value(boardinfo, "SERIAL", buffer, size);
+}
+
 static void add_string_if(struct json_object *object, const char *key,
                           const char *value) {
   if (value && *value)
