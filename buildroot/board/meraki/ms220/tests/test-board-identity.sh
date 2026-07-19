@@ -36,6 +36,36 @@ if POSTMERKOS_RUN_DIR="$TMP/run" POSTMERKOS_BOARDINFO="$TMP/run/boardinfo" \
   echo 'identity unexpectedly accepted missing EEPROM data' >&2; exit 1
 fi
 [ ! -e "$TMP/run/boardinfo" ]
+# A PMOSLIVE boot may supply exact model identity through the standard kernel
+# command line when the physical EEPROM and flash fallback are unavailable.
+printf '%s\n' 'console=ttyS0 postmerkos.live=1 postmerkos.model=MS42P root=/dev/ram0' >"$TMP/cmdline"
+POSTMERKOS_RUN_DIR="$TMP/run" POSTMERKOS_BOARDINFO="$TMP/run/boardinfo" \
+POSTMERKOS_BOARD_DATA="$TMP/board_data" POSTMERKOS_BOARD_PROFILE="$PROFILE" \
+POSTMERKOS_PROC_CMDLINE="$TMP/cmdline" POSTMERKOS_LIVE_MARKER="$TMP/no-marker" \
+  "$IDENTITY" >"$TMP/live-identity.console"
+grep -q '^PMOSLIVE PLATFORM-READY MODEL=MS42P SOURCE=pmoslive-command-line$' "$TMP/live-identity.console"
+grep -q '^MODEL=MS42P$' "$TMP/run/boardinfo"
+grep -q '^PRODUCT_NUMBER=600-21020$' "$TMP/run/boardinfo"
+grep -q '^IDENTITY_SOURCE=pmoslive-command-line$' "$TMP/run/boardinfo"
+grep -q '^IDENTITY_VOLATILE=1$' "$TMP/run/boardinfo"
+# The command-line hint is accepted only for a live boot and only for a model
+# supported by the exact profile table.
+printf '%s\n' 'console=ttyS0 postmerkos.model=MS42P root=/dev/ram0' >"$TMP/cmdline"
+if POSTMERKOS_RUN_DIR="$TMP/run" POSTMERKOS_BOARDINFO="$TMP/run/boardinfo" \
+   POSTMERKOS_BOARD_DATA="$TMP/board_data" POSTMERKOS_BOARD_PROFILE="$PROFILE" \
+   POSTMERKOS_PROC_CMDLINE="$TMP/cmdline" POSTMERKOS_LIVE_MARKER="$TMP/no-marker" \
+   "$IDENTITY" >/dev/null 2>&1; then
+  echo 'identity unexpectedly accepted a non-live model hint' >&2; exit 1
+fi
+[ ! -e "$TMP/run/boardinfo" ]
+printf '%s\n' 'postmerkos.live=1 postmerkos.model=NOT-A-SWITCH' >"$TMP/cmdline"
+if POSTMERKOS_RUN_DIR="$TMP/run" POSTMERKOS_BOARDINFO="$TMP/run/boardinfo" \
+   POSTMERKOS_BOARD_DATA="$TMP/board_data" POSTMERKOS_BOARD_PROFILE="$PROFILE" \
+   POSTMERKOS_PROC_CMDLINE="$TMP/cmdline" POSTMERKOS_LIVE_MARKER="$TMP/no-marker" \
+   "$IDENTITY" >/dev/null 2>&1; then
+  echo 'identity unexpectedly accepted an unsupported live model hint' >&2; exit 1
+fi
+[ ! -e "$TMP/run/boardinfo" ]
 # Hardware-verified PoE profiles must expose their exact GPIO pair; non-PoE
 # profiles remain write-disabled.
 check_poe() {

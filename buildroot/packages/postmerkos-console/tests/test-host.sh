@@ -131,8 +131,15 @@ if printf '' | POSTMERKOS_SESSION_WAIT=1 POSTMERKOS_TEST_ROLE=none \
     echo 'console unexpectedly accepted role=none' >&2; exit 1
 fi
 grep -q 'no postmerkOS management role' "$TMP/no-role.out"
+# Both the management menu and direct serial supervisor must identify volatile
+# PMOSLIVE sessions prominently.
+printf '%s\n' '{"active":true,"transport":"pmoslive","persistence":false}' >"$TMP/live-mode"
+printf '0\n' | POSTMERKOS_LIVE_MARKER="$TMP/live-mode" \
+  POSTMERKOSCTL="$TMP/postmerkosctl" "$CONSOLE" menu >"$TMP/live-menu.out"
+grep -q 'PMOSLIVE RAM SESSION' "$TMP/live-menu.out"
+grep -q 'changes will not survive a reboot' "$TMP/live-menu.out"
 SERIAL=$(CDPATH= cd -- "$HERE/../files" && pwd)/postmerkos-serial-login
-for marker in 'login)' 'status)' 'logs)' 'reboot)' 'help|' 'management-health'; do
+for marker in 'login)' 'status)' 'logs)' 'reboot)' 'help|' 'management-health' 'Firmware is running from RAM. Changes will not survive a reboot.'; do
   grep -Fq "$marker" "$SERIAL"
 done
 

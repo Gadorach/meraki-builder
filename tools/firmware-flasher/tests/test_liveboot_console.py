@@ -155,10 +155,11 @@ class LivebootConsoleTests(unittest.TestCase):
             ),
             "[    2.000000] VFS: Mounted root (squashfs filesystem) readonly on device 1:0.",
             "PMOSLIVE USERSPACE-READY ROOT=ram0 OVERLAY=tmpfs FLASH_MOUNTED=0",
+            "PMOSLIVE PLATFORM-READY MODEL=MS42P SOURCE=pmoslive-command-line",
         ]
         selection = pv3.TransportSelection(921600, 4096, 1, True, True, True)
         plan = pv3.RepresentationPlan(pv3.REP_RAW, 4096, ())
-        bundle = mock.Mock(image=Path("image.bin"), manifest_bytes=b"{}")
+        bundle = mock.Mock(image=Path("image.bin"), manifest_bytes=b"{}", model="MS42P")
         controller = mock.Mock()
         with mock.patch.object(pv3, "choose_representation", return_value=plan), \
              mock.patch.object(pv3, "make_manifest_plan", return_value=plan), \
@@ -170,7 +171,7 @@ class LivebootConsoleTests(unittest.TestCase):
             )
         self.assertEqual(
             result,
-            "PMOSLIVE USERSPACE-READY ROOT=ram0 OVERLAY=tmpfs FLASH_MOUNTED=0",
+            "PMOSLIVE PLATFORM-READY MODEL=MS42P SOURCE=pmoslive-command-line",
         )
         self.assertIn(mock.call(b"PMOS3 LIVEBOOT\n"), link.write_all.call_args_list)
         self.assertIn(mock.call(b"BOOTRAM deadbeef\n"), link.write_all.call_args_list)
@@ -217,6 +218,41 @@ class LivebootConsoleTests(unittest.TestCase):
         ]
         with self.assertRaisesRegex(pv3.ProtocolError, "live command line is missing"):
             pv3.wait_for_liveboot_success(link, 30.0)
+
+
+    def test_liveboot_rejects_platform_mismatch(self) -> None:
+        link = mock.Mock()
+        link.read_line.side_effect = [
+            "VCOREIII PROM ARGV-ACCEPTED argc=12 envc=3",
+            "MIPS CMDLINE-SOURCE=firmware",
+            "Initial ramdisk at: 0x87000000 (8269824 bytes)",
+            (
+                "Kernel command line: mem=120M rd_start=0x87000000 rd_size=0x7e3000 "
+                "root=/dev/ram0 rootfstype=squashfs postmerkos.live=1"
+            ),
+            "VFS: Mounted root (squashfs filesystem) readonly on device 1:0.",
+            "PMOSLIVE USERSPACE-READY ROOT=ram0 OVERLAY=tmpfs FLASH_MOUNTED=0",
+            "PMOSLIVE PLATFORM-READY MODEL=MS42 SOURCE=pmoslive-command-line",
+        ]
+        with self.assertRaisesRegex(pv3.ProtocolError, "platform mismatch"):
+            pv3.wait_for_liveboot_success(link, 30.0, "MS42P")
+
+    def test_liveboot_requires_platform_after_userspace(self) -> None:
+        link = mock.Mock()
+        link.read_line.side_effect = [
+            "VCOREIII PROM ARGV-ACCEPTED argc=12 envc=3",
+            "MIPS CMDLINE-SOURCE=firmware",
+            "Initial ramdisk at: 0x87000000 (8269824 bytes)",
+            (
+                "Kernel command line: mem=120M rd_start=0x87000000 rd_size=0x7e3000 "
+                "root=/dev/ram0 rootfstype=squashfs postmerkos.live=1"
+            ),
+            "VFS: Mounted root (squashfs filesystem) readonly on device 1:0.",
+            "PMOSLIVE USERSPACE-READY ROOT=ram0 OVERLAY=tmpfs FLASH_MOUNTED=0",
+        ]
+        with mock.patch.object(pv3.time, "monotonic", side_effect=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 31.0]):
+            with self.assertRaisesRegex(pv3.ProtocolError, "platform identity attestation"):
+                pv3.wait_for_liveboot_success(link, 30.0, "MS42P")
 
 
 if __name__ == "__main__":

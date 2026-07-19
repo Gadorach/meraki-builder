@@ -271,6 +271,8 @@ def _validate_loader_capability(manifest: dict, loader_sha256: str, family: str,
             raise ProtocolError("firmware loader PMOSLIVE transport contract is incompatible")
         if live_record.get("linux_handoff") != "mips-legacy-argc-argv-envp-external-initrd-v1":
             raise ProtocolError("firmware loader PMOSLIVE Linux handoff contract is incompatible")
+        if live_record.get("platform_identity_handoff") != "kernel-command-line-postmerkos-model-v1":
+            raise ProtocolError("firmware loader PMOSLIVE platform identity handoff is incompatible")
         if live_record.get("rootfs_handoff") != "squashfs-as-legacy-initrd-v1":
             raise ProtocolError("firmware loader PMOSLIVE rootfs handoff contract is incompatible")
         if live_record.get("kernel_load_address") != 0x81000000 or live_record.get("squashfs_address") != 0x87000000:
@@ -475,6 +477,8 @@ def _liveboot_payload_record(manifest: dict, model: str) -> dict:
         raise ProtocolError("manifest UART liveboot integrity contract is incompatible")
     if liveboot.get("linux_handoff") != "mips-legacy-argc-argv-envp-external-initrd-v1":
         raise ProtocolError("manifest UART liveboot Linux handoff is incompatible")
+    if liveboot.get("platform_identity_handoff") != "kernel-command-line-postmerkos-model-v1":
+        raise ProtocolError("manifest UART liveboot platform identity handoff is incompatible")
     if liveboot.get("kernel_boot_argument_contract") != "vcoreiii-standard-mips-argc-argv-envp-fallback-v1":
         raise ProtocolError(
             "manifest kernel does not declare standard VCore-III MIPS/U-Boot argument support; "
@@ -513,6 +517,8 @@ def _liveboot_payload_record(manifest: dict, model: str) -> dict:
         raise ProtocolError("manifest PMOSLIVE payload transport contract is incompatible")
     if record.get("linux_handoff") != "mips-legacy-argc-argv-envp-external-initrd-v1":
         raise ProtocolError("manifest PMOSLIVE payload Linux handoff is incompatible")
+    if record.get("platform_identity_handoff") != "kernel-command-line-postmerkos-model-v1":
+        raise ProtocolError("manifest PMOSLIVE payload platform identity handoff is incompatible")
     if record.get("kernel_boot_argument_contract") != "vcoreiii-standard-mips-argc-argv-envp-fallback-v1":
         raise ProtocolError("manifest PMOSLIVE payload is not bound to the U-Boot-compatible kernel contract")
     if record.get("rootfs_handoff") != "squashfs-as-legacy-initrd-v1":
@@ -708,11 +714,19 @@ class SerialLink:
     @staticmethod
     def _safe_line_for_console(raw: bytes) -> str:
         payload = raw.rstrip(b"\r\n")
-        return "".join(
-            chr(value) if value == 0x09 or 0x20 <= value <= 0x7E
-            else f"\\x{value:02x}"
-            for value in payload
-        )
+        rendered: list[str] = []
+        for value in payload:
+            if value == 0x08:
+                # Linux's legacy RAM-disk loader animates a spinner with
+                # backspaces. Apply the terminal edit instead of logging a
+                # page of literal ``\x08`` escape sequences.
+                if rendered:
+                    rendered.pop()
+            elif value == 0x09 or 0x20 <= value <= 0x7E:
+                rendered.append(chr(value))
+            else:
+                rendered.append(f"\\x{value:02x}")
+        return "".join(rendered)
 
     def discard_buffer(self) -> None:
         self.buffer.clear()

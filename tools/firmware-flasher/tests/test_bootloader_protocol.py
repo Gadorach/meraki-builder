@@ -140,6 +140,7 @@ class BundleFixture:
             "flash_access": "none",
             "transport_contract": "pmosrec-v3-adaptive-uart-sparse-lz4-v1",
             "linux_handoff": "mips-legacy-argc-argv-envp-external-initrd-v1",
+            "platform_identity_handoff": "kernel-command-line-postmerkos-model-v1",
             "kernel_boot_argument_contract": "vcoreiii-standard-mips-argc-argv-envp-fallback-v1",
             "rootfs_handoff": "squashfs-as-legacy-initrd-v1",
             "ram_layout": {
@@ -231,6 +232,7 @@ class BundleFixture:
                     "transport_contract": "pmosrec-v3-adaptive-uart-sparse-lz4-v1",
                     "transport_integrity": ["frame-crc32", "compact-ack-crc32", "object-crc32", "object-sha256", "reconstructed-image-sha256"],
                     "linux_handoff": "mips-legacy-argc-argv-envp-external-initrd-v1",
+                    "platform_identity_handoff": "kernel-command-line-postmerkos-model-v1",
                     "kernel_boot_argument_contract": "vcoreiii-standard-mips-argc-argv-envp-fallback-v1",
                     "rootfs_handoff": "squashfs-as-legacy-initrd-v1",
                     "payloads": {"jaguar1": live_record},
@@ -295,6 +297,13 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(recovered, binary)
         self.assertEqual(output.getvalue(), line.decode("ascii"))
         self.assertNotIn("\x1b[2J", output.getvalue())
+
+    def test_safe_console_line_applies_ramdisk_spinner_backspaces(self) -> None:
+        raw = b"RAMDISK: Loading 8073KiB [1 disk] into ram disk... |\b/\b-\b\\\bdone.\n"
+        self.assertEqual(
+            bp.SerialLink._safe_line_for_console(raw),
+            "RAMDISK: Loading 8073KiB [1 disk] into ram disk... done.",
+        )
 
     def test_wait_for_surfaces_recovery_stage_failure(self) -> None:
         link = bp.SerialLink(19, echo=False)

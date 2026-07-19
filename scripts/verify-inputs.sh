@@ -168,6 +168,8 @@ if live_descriptor.get("load_address") != 0x86C00000 or live_descriptor.get("ent
     raise SystemExit("PMOSLIVE descriptor high-memory load/entry mismatch")
 if live_descriptor.get("transport_contract") != "pmosrec-v3-adaptive-uart-sparse-lz4-v1":
     raise SystemExit("PMOSLIVE descriptor transport contract mismatch")
+if live_descriptor.get("platform_identity_handoff") != "kernel-command-line-postmerkos-model-v1":
+    raise SystemExit("PMOSLIVE descriptor platform identity handoff mismatch")
 expected_ram = {
     "kernel_load_address": 0x81000000,
     "image_staging_address": 0x81400000,
@@ -197,6 +199,7 @@ expected_embedded = {
     "accepted_models": ["MS42", "MS42P"],
     "transport_contract": "pmosrec-v3-adaptive-uart-sparse-lz4-v1",
     "linux_handoff": "mips-legacy-argc-argv-envp-external-initrd-v1",
+    "platform_identity_handoff": "kernel-command-line-postmerkos-model-v1",
     "rootfs_handoff": "squashfs-as-legacy-initrd-v1",
     "kernel_load_address": 0x81000000,
     "squashfs_address": 0x87000000,

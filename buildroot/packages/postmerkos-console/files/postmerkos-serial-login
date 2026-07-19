@@ -3,6 +3,7 @@ PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 SECURITY=/config/postmerkos/security.json
 LOG=/run/postmerkos/serial-session.log
+LIVE_MARKER=${POSTMERKOS_LIVE_MARKER:-/run/postmerkos/live-mode}
 mkdir -p /run/postmerkos
 read_mode() {
     mode=disabled
@@ -18,6 +19,11 @@ log_action() {
     socket=missing; [ -S /run/postmerkos/configd.sock ] && socket=present
     printf '%s mode=%s uid=%s gid=%s command=%s configd_socket=%s result=%s\n' \
       "$(date +%s 2>/dev/null || echo 0)" "${mode:-unknown}" "$uid" "$gid" "$command" "$socket" "$result" >>"$LOG"
+}
+show_live_warning() {
+    [ -r "$LIVE_MARKER" ] || return 0
+    printf '%s\n' '*** PMOSLIVE RAM SESSION ***'
+    printf '%s\n' 'Firmware is running from RAM. Changes will not survive a reboot.'
 }
 show_help() {
 cat <<'HELP'
@@ -47,6 +53,7 @@ confirm_reboot() {
     reboot
 }
 printf '\npostmerkOS serial console\n'
+show_live_warning
 while :; do
     read_mode
     case "$mode" in
@@ -99,4 +106,5 @@ while :; do
             ;;
     esac
     printf '\nReturned to the postmerkOS serial console.\n'
+    show_live_warning
 done

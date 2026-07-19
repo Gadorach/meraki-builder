@@ -246,6 +246,8 @@ if live_descriptor.get("transport_contract") != "pmosrec-v3-adaptive-uart-sparse
     raise SystemExit("PMOSLIVE descriptor transport contract mismatch")
 if live_descriptor.get("linux_handoff") != "mips-legacy-argc-argv-envp-external-initrd-v1":
     raise SystemExit("PMOSLIVE descriptor Linux handoff mismatch")
+if live_descriptor.get("platform_identity_handoff") != "kernel-command-line-postmerkos-model-v1":
+    raise SystemExit("PMOSLIVE descriptor platform identity handoff mismatch")
 if live_descriptor.get("rootfs_handoff") != "squashfs-as-legacy-initrd-v1":
     raise SystemExit("PMOSLIVE descriptor rootfs handoff mismatch")
 live_ram = {
@@ -275,6 +277,7 @@ for key, value in {
     "accepted_models": ["MS42", "MS42P"],
     "transport_contract": "pmosrec-v3-adaptive-uart-sparse-lz4-v1",
     "linux_handoff": "mips-legacy-argc-argv-envp-external-initrd-v1",
+    "platform_identity_handoff": "kernel-command-line-postmerkos-model-v1",
     "rootfs_handoff": "squashfs-as-legacy-initrd-v1",
     "kernel_load_address": 0x81000000,
     "squashfs_address": 0x87000000,
@@ -298,6 +301,7 @@ live_payload = {
     "flash_access": "none",
     "transport_contract": "pmosrec-v3-adaptive-uart-sparse-lz4-v1",
     "linux_handoff": "mips-legacy-argc-argv-envp-external-initrd-v1",
+    "platform_identity_handoff": "kernel-command-line-postmerkos-model-v1",
     "rootfs_handoff": "squashfs-as-legacy-initrd-v1",
     "ram_layout": live_ram,
 }
@@ -394,6 +398,7 @@ data = {
             "transport_contract": "pmosrec-v3-adaptive-uart-sparse-lz4-v1",
             "transport_integrity": ["frame-crc32", "compact-ack-crc32", "object-crc32", "object-sha256", "reconstructed-image-sha256"],
             "linux_handoff": "mips-legacy-argc-argv-envp-external-initrd-v1",
+            "platform_identity_handoff": "kernel-command-line-postmerkos-model-v1",
             "rootfs_handoff": "squashfs-as-legacy-initrd-v1",
             "payloads": {"jaguar1": live_payload},
         },

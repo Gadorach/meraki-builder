@@ -226,6 +226,13 @@ int console_print_summary(struct json_object *config) {
   printf("Management address: %s\n", string_member(ipv4, "address", "unavailable"));
   printf("Gateway:            %s\n", string_member(ipv4, "gateway", "unavailable"));
   printf("MTU:                %d\n", int_member(ipv4, "mtu", 0));
+  struct json_object *boot = object_member(status, "boot");
+  if (bool_member(boot, "live_mode", false)) {
+    printf("Boot mode:          PMOSLIVE RAM (volatile)\n");
+    puts("WARNING: Firmware is running from RAM. Changes will not survive a reboot.");
+  } else {
+    printf("Boot mode:          %s\n", string_member(boot, "mode", "flash"));
+  }
   print_temperatures(status);
   printf("Reported errors:    %zu\n", errors && json_object_is_type(errors, json_type_array)
          ? json_object_array_length(errors) : 0U);

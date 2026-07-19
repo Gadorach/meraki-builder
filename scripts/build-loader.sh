@@ -189,6 +189,8 @@ if live_descriptor.get("transport_contract") != "pmosrec-v3-adaptive-uart-sparse
     raise SystemExit("PMOSLIVE descriptor transport contract is invalid")
 if live_descriptor.get("linux_handoff") != "mips-legacy-argc-argv-envp-external-initrd-v1":
     raise SystemExit("PMOSLIVE descriptor Linux handoff is invalid")
+if live_descriptor.get("platform_identity_handoff") != "kernel-command-line-postmerkos-model-v1":
+    raise SystemExit("PMOSLIVE descriptor platform identity handoff is invalid")
 if live_descriptor.get("rootfs_handoff") != "squashfs-as-legacy-initrd-v1":
     raise SystemExit("PMOSLIVE descriptor rootfs handoff is invalid")
 ram = live_descriptor.get("ram_layout", {})
@@ -228,6 +230,7 @@ for key in (
         "accepted_models": ["MS42", "MS42P"],
         "transport_contract": "pmosrec-v3-adaptive-uart-sparse-lz4-v1",
         "linux_handoff": "mips-legacy-argc-argv-envp-external-initrd-v1",
+        "platform_identity_handoff": "kernel-command-line-postmerkos-model-v1",
         "rootfs_handoff": "squashfs-as-legacy-initrd-v1",
         "kernel_load_address": 0x81000000,
         "squashfs_address": 0x87000000,

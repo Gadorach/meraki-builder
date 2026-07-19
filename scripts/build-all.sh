@@ -162,6 +162,7 @@ assert live_descriptor.get("protocol_version") == 3
 assert live_descriptor.get("flash_access") == "none"
 assert live_descriptor.get("load_address") == 0x86C00000
 assert live_descriptor.get("entry_address") == 0x86C00000
+assert live_descriptor.get("platform_identity_handoff") == "kernel-command-line-postmerkos-model-v1"
 assert live_descriptor.get("ram_layout") == {
     "kernel_load_address": 0x81000000,
     "image_staging_address": 0x81400000,

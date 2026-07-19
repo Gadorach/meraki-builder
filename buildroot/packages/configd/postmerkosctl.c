@@ -351,6 +351,13 @@ static void print_summary(struct json_object *snapshot) {
   printf("Management state:   %s\n", string_member(network, "state", "unknown"));
   printf("Management address: %s\n", string_member(network, "address", "unavailable"));
   printf("Date/time:          %s\n", string_member(status, "datetime", "unknown"));
+  struct json_object *boot = member(status, "boot");
+  if (bool_member(boot, "live_mode", false)) {
+    printf("Boot mode:          PMOSLIVE RAM (volatile)\n");
+    puts("WARNING: Firmware is running from RAM. Changes will not survive a reboot.");
+  } else {
+    printf("Boot mode:          %s\n", string_member(boot, "mode", "flash"));
+  }
   if (bool_member(member(status, "security"), "default_password_active", false))
     puts("WARNING: The root password is still set to the device serial number.");
 }

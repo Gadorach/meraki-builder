@@ -14,6 +14,7 @@ SESSION_STATE=unknown
 SESSION_ERROR=
 KERNEL_PRINTK=
 TMP_RESPONSE=/tmp/postmerkos-console.$$.out
+LIVE_MARKER=${POSTMERKOS_LIVE_MARKER:-/run/postmerkos/live-mode}
 restore_console_chatter() {
     [ -n "${KERNEL_PRINTK:-}" ] && [ -w /proc/sys/kernel/printk ] && printf '%s
 ' "$KERNEL_PRINTK" >/proc/sys/kernel/printk 2>/dev/null || true
@@ -1261,6 +1262,12 @@ Scriptable compatibility:
 EOF_USAGE
 }
 
+live_mode_warning() {
+    [ -r "$LIVE_MARKER" ] || return 0
+    echo '*** PMOSLIVE RAM SESSION — changes will not survive a reboot. ***'
+    echo
+}
+
 default_password_warning() {
     [ -e /config/postmerkos/default-password-active ] || return 0
     cat <<'EOF_PASSWORD'
@@ -1320,6 +1327,7 @@ main_menu() {
     compatibility_first_access
     while :; do
         heading ''
+        live_mode_warning
         echo '- type the preferred option to continue'
         echo
         menu5= menu6= menu7= menu8= menu3= menu4=

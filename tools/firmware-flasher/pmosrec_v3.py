@@ -947,7 +947,7 @@ def _kernel_message(line: str) -> str:
     return line
 
 
-def wait_for_liveboot_success(link: SerialLink, timeout: float) -> str:
+def wait_for_liveboot_success(link: SerialLink, timeout: float, expected_model: str | None = None) -> str:
     """Require proof that Linux used the transferred RAM root.
 
     A generic Linux banner is not enough: the failed hardware test reached the
@@ -961,6 +961,7 @@ def wait_for_liveboot_success(link: SerialLink, timeout: float) -> str:
     saw_initrd = False
     saw_cmdline = False
     saw_ram_root = False
+    saw_userspace = False
 
     while True:
         remaining = deadline - time.monotonic()
@@ -976,8 +977,11 @@ def wait_for_liveboot_success(link: SerialLink, timeout: float) -> str:
                 missing.append("live kernel command line")
             if not saw_ram_root:
                 missing.append("RAM-root mount")
+            if not saw_userspace:
+                missing.append("live userspace attestation")
+            missing.append("platform identity attestation")
             raise ProtocolError(
-                "timed out before PMOSLIVE userspace attestation; missing: "
+                "timed out before PMOSLIVE platform attestation; missing: "
                 + ", ".join(missing)
             )
 
@@ -1049,7 +1053,28 @@ def wait_for_liveboot_success(link: SerialLink, timeout: float) -> str:
                     "PMOSLIVE userspace started before the kernel handoff was proven: "
                     + ", ".join(missing)
                 )
-            print("[liveboot] Standard MIPS/U-Boot kernel handoff verified.", flush=True)
+            saw_userspace = True
+            print("[liveboot] Standard MIPS/U-Boot kernel handoff verified; waiting for platform identity.", flush=True)
+        elif message.startswith("PMOSLIVE PLATFORM-READY "):
+            if not saw_userspace:
+                raise ProtocolError(
+                    "PMOSLIVE platform identity was reported before live userspace attestation"
+                )
+            match = re.fullmatch(
+                r"PMOSLIVE PLATFORM-READY MODEL=([A-Za-z0-9._-]+) SOURCE=([A-Za-z0-9._-]+)",
+                message,
+            )
+            if match is None:
+                raise ProtocolError(f"invalid PMOSLIVE platform attestation: {message}")
+            model = match.group(1)
+            if expected_model is not None and model != expected_model:
+                raise ProtocolError(
+                    f"PMOSLIVE platform mismatch: expected {expected_model}, target reported {model}"
+                )
+            print(
+                f"[liveboot] PMOSLIVE RAM root and platform identity verified: {model}.",
+                flush=True,
+            )
             return message
 
 
@@ -1123,7 +1148,7 @@ def send_liveboot_v3(link: SerialLink, bundle: BundleInfo, selection: TransportS
     link.wait_for(("PMOSLIVE UART-BASELINE-READY RATE=115200",), 5.0)
     exec_line = link.wait_for(("PMOSLIVE EXEC ENTRY=",), 5.0)
     print(f"[liveboot] {exec_line}", flush=True)
-    return wait_for_liveboot_success(link, boot_timeout)
+    return wait_for_liveboot_success(link, boot_timeout, bundle.model)
 
 
 def send_package_v3(link: SerialLink, bundle: BundleInfo, selection: TransportSelection,

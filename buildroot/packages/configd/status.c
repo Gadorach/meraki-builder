@@ -248,16 +248,35 @@ struct json_object *get_status(void) {
     default_marker = "/config/postmerkos/default-password-active";
   json_object_object_add(security, "default_password_active",
                          json_object_new_boolean(access(default_marker, F_OK) == 0));
+  const char *live_marker = getenv("POSTMERKOS_LIVE_MARKER");
+  if (!live_marker || !*live_marker)
+    live_marker = "/run/postmerkos/live-mode";
+  bool live_mode = access(live_marker, F_OK) == 0;
   const char *overlay_recovery = getenv("POSTMERKOS_OVERLAY_RECOVERY_MARKER");
   if (!overlay_recovery || !*overlay_recovery)
     overlay_recovery = "/run/postmerkos/overlay-recovery-mode";
   bool recovery_mode = access(overlay_recovery, F_OK) == 0;
   json_object_object_add(security, "persistent_overlay_recovery_mode",
                          json_object_new_boolean(recovery_mode));
-  if (recovery_mode)
+  if (recovery_mode && !live_mode)
     add_error(errors, "persistent-overlay",
               "persistent JFFS2 is unavailable; the switch is using a temporary recovery overlay and changes will not survive reboot");
   json_object_object_add(root, "security", security);
+
+  struct json_object *boot = json_object_new_object();
+  json_object_object_add(boot, "live_mode",
+                         json_object_new_boolean(live_mode));
+  json_object_object_add(boot, "running_from_ram",
+                         json_object_new_boolean(live_mode));
+  json_object_object_add(boot, "mode",
+                         json_object_new_string(live_mode ? "pmoslive-ram" : "flash"));
+  json_object_object_add(boot, "persistence",
+                         json_object_new_string(live_mode ? "volatile" : "persistent"));
+  if (live_mode)
+    json_object_object_add(boot, "warning", json_object_new_string(
+        "Firmware is running from RAM. Changes will not survive a reboot."));
+  json_object_object_add(root, "boot", boot);
+
   struct json_object *hardware_policy = json_object_new_object();
   struct json_object *hardware_controls = json_object_from_file(
       "/run/postmerkos/hardware-controls.json");

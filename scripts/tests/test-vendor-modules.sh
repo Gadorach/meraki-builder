@@ -186,6 +186,7 @@ live_ram = {
     "image": {"bytes": 0x1000000, "kernel_offset": 0x40000, "squashfs_offset": 0x300000},
     "ram_layout": live_ram,
     "linux_handoff": "mips-legacy-argc-argv-envp-external-initrd-v1",
+    "platform_identity_handoff": "kernel-command-line-postmerkos-model-v1",
     "rootfs_handoff": "squashfs-as-legacy-initrd-v1",
     "binary": {"filename": live_payload.name, "bytes": live_payload.stat().st_size, "sha256": live_digest},
 }, indent=2, sort_keys=True) + "\n")
@@ -227,6 +228,7 @@ Path(loader_manifest).write_text(json.dumps({
             "accepted_models": ["MS42", "MS42P"],
             "transport_contract": "pmosrec-v3-adaptive-uart-sparse-lz4-v1",
             "linux_handoff": "mips-legacy-argc-argv-envp-external-initrd-v1",
+            "platform_identity_handoff": "kernel-command-line-postmerkos-model-v1",
             "rootfs_handoff": "squashfs-as-legacy-initrd-v1",
             "kernel_load_address": 0x81000000, "squashfs_address": 0x87000000,
             "boot_params_physical_address": 0x00000400,

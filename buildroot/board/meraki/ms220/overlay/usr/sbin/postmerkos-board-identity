@@ -6,11 +6,45 @@ RUN_DIR=${POSTMERKOS_RUN_DIR:-/run/postmerkos}
 OUTPUT=${POSTMERKOS_BOARDINFO:-$RUN_DIR/boardinfo}
 BOARD_DATA=${POSTMERKOS_BOARD_DATA:-board_data}
 PROFILE=${POSTMERKOS_BOARD_PROFILE:-postmerkos-board-profile}
+CMDLINE=${POSTMERKOS_PROC_CMDLINE:-/proc/cmdline}
+LIVE_MARKER=${POSTMERKOS_LIVE_MARKER:-$RUN_DIR/live-mode}
 sanitize() { printf '%s' "$1" | tr -cd 'A-Za-z0-9:._-'; }
+cmdline_value() {
+  key=$1
+  [ -r "$CMDLINE" ] || return 1
+  for token in $(cat "$CMDLINE" 2>/dev/null); do
+    case "$token" in "$key"=*) printf '%s\n' "${token#*=}"; return 0 ;; esac
+  done
+  return 1
+}
+live_boot() {
+  [ -r "$LIVE_MARKER" ] && return 0
+  [ -r "$CMDLINE" ] && grep -Eq '(^|[[:space:]])postmerkos\.live=1([[:space:]]|$)' "$CMDLINE" 2>/dev/null
+}
+product_for_model() {
+  case "$1" in
+    MS42) printf '%s\n' 600-21010 ;;
+    MS42P) printf '%s\n' 600-21020 ;;
+    *) return 1 ;;
+  esac
+}
 mkdir -p "$RUN_DIR"
 rm -f "$OUTPUT.tmp.$$"
 product=$($BOARD_DATA product_number 2>/dev/null || true)
 model=$($BOARD_DATA model_exact 2>/dev/null || true)
+identity_source=board-config
+identity_volatile=0
+if { [ -z "$product" ] || [ -z "$model" ]; } && live_boot; then
+  hinted_model=$(sanitize "$(cmdline_value postmerkos.model 2>/dev/null || true)")
+  if [ -n "$hinted_model" ] && $PROFILE "$hinted_model" >/dev/null 2>&1; then
+    [ -n "$model" ] || model=$hinted_model
+    if [ -z "$product" ] && [ "$model" = "$hinted_model" ]; then
+      product=$(product_for_model "$model" 2>/dev/null || true)
+    fi
+    identity_source=pmoslive-command-line
+    identity_volatile=1
+  fi
+fi
 if [ -z "$product" ] || [ -z "$model" ]; then
   rm -f "$OUTPUT"
   echo 'postmerkOS identity: exact board identity unavailable; model-specific hardware actions disabled' >&2
@@ -24,8 +58,14 @@ mac=$(sanitize "$($BOARD_DATA mac 2>/dev/null || true)")
   printf 'PRODUCT_NUMBER=%s\n' "$(sanitize "$product")"
   printf 'SERIAL=%s\n' "$serial"
   printf 'MAC=%s\n' "$mac"
-  printf 'IDENTITY_SOURCE=board-config\nIDENTITY_EXACT=1\n'
+  printf 'IDENTITY_SOURCE=%s\nIDENTITY_EXACT=1\nIDENTITY_VOLATILE=%s\n' \
+    "$identity_source" "$identity_volatile"
 } > "$OUTPUT.tmp.$$"
 chmod 0444 "$OUTPUT.tmp.$$"
 mv -f "$OUTPUT.tmp.$$" "$OUTPUT"
-echo "postmerkOS identity: $model ($product)"
+if [ "$identity_volatile" = 1 ]; then
+  echo "postmerkOS identity: $model ($product), supplied by PMOSLIVE boot parameters"
+  printf 'PMOSLIVE PLATFORM-READY MODEL=%s SOURCE=%s\n' "$model" "$identity_source"
+else
+  echo "postmerkOS identity: $model ($product)"
+fi

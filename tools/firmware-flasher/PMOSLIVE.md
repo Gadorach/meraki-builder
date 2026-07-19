@@ -151,3 +151,12 @@ Kernel artifacts are reusable only when
 managed patch, config policy, and hashes of `vmlinuz`, `vmlinuz.bin`, and the
 kernel-header archive. The release-manifest writer also verifies that the SPIM
 payload matches this record before publishing live capability.
+
+
+Platform completion attestation:
+
+```text
+PMOSLIVE PLATFORM-READY MODEL=MS42P SOURCE=pmoslive-command-line
+```
+
+The host flasher waits for this marker after the RAM-root userspace attestation and verifies that the reported model matches the selected firmware target.
