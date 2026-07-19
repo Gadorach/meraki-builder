@@ -1,29 +1,42 @@
+ Makefile                                           |  10 +-
+ PACKAGE-IDENTITY.txt                               |   7 +
+ PMOSLIVE-BUILD-FIX-2026-07-19.md                   |  54 ++++
+ PMOSLIVE-BUILD-RERUN-2026-07-19.md                 |  50 ++++
+ PMOSLIVE-FINAL-TEST-RESULTS.log                    |  31 +++
+ PMOSLIVE-MEMORY-MAP.md                             |  28 +++
+ PMOSLIVE-RELEASE-NOTES.md                          |  70 ++++++
  buildroot/board/meraki/ms220/overlay/etc/fstab     |   6 +-
  .../ms220/overlay/etc/init.d/S01postmerkos-overlay |  15 +-
- buildroot/board/meraki/ms220/post-build.sh         | 136 ++++++++++++++-
- .../board/meraki/ms220/tests/test-overlay-init.sh  |  20 ++-
+ buildroot/board/meraki/ms220/post-build.sh         | 136 +++++++++-
+ .../board/meraki/ms220/tests/test-overlay-init.sh  |  20 +-
  buildroot/packages/fwupdate/files/common.sh        |   8 +
  buildroot/packages/fwupdate/files/fw_factory_reset |   1 +
  buildroot/packages/fwupdate/files/fw_update        |   4 +
- buildroot/packages/fwupdate/tests/test-host.sh     |  24 +++
- docs/architecture/recovery-flat-binary-entry.md    |  46 ++++-
+ buildroot/packages/fwupdate/tests/test-host.sh     |  25 ++
+ docs/architecture/recovery-flat-binary-entry.md    |  46 +++-
  fwupdate/files/common.sh                           |   8 +
  fwupdate/files/fw_factory_reset                    |   1 +
  fwupdate/files/fw_update                           |   4 +
- scripts/build-all.sh                               |  61 ++++++-
+ fwupdate/tests/test-host.sh                        |  68 +++++
+ scripts/build-all.sh                               |  71 +++++-
  scripts/build-kernel.sh                            |   3 +
- scripts/build-loader.sh                            | 105 ++++++++++--
+ scripts/build-loader.sh                            | 105 +++++++-
  scripts/build-rootfs.sh                            |   2 +
  scripts/common.sh                                  |   1 +
- scripts/tests/test-artifact-manifest.py            | 116 ++++++++++++-
- scripts/tests/test-vendor-modules.sh               |  72 +++++++-
- scripts/verify-inputs.sh                           |  88 +++++++++-
- scripts/write-artifact-manifest.py                 | 147 ++++++++++++++--
- tools/firmware-flasher/BOOTLOADER-RECOVERY.md      |  64 ++++++-
- tools/firmware-flasher/bootloader-ramload.py       |  19 ++-
- tools/firmware-flasher/bootloader_protocol.py      | 188 +++++++++++++++++++--
- tools/firmware-flasher/pmosrec_v3.py               | 100 +++++++++++
- .../tests/test_bootloader_protocol.py              | 160 ++++++++++++++++--
- tools/firmware-flasher/tests/test_pmosrec_v3.py    |  25 +++
+ scripts/configure-liveboot-kernel.py               |  88 +++++++
+ scripts/tests/test-artifact-manifest.py            | 116 ++++++++-
+ scripts/tests/test-build-cache-contract.py         |   3 +
+ scripts/tests/test-liveboot-kernel-config.py       |  33 +++
+ scripts/tests/test-vendor-modules.sh               |  72 +++++-
+ scripts/verify-inputs.sh                           |  88 ++++++-
+ scripts/write-artifact-manifest.py                 | 147 ++++++++++-
+ tools/firmware-flasher/BOOTLOADER-RECOVERY.md      |  64 ++++-
+ tools/firmware-flasher/PMOSLIVE.md                 |  68 +++++
+ tools/firmware-flasher/bootloader-liveboot.py      | 274 +++++++++++++++++++++
+ tools/firmware-flasher/bootloader-ramload.py       |  19 +-
+ tools/firmware-flasher/bootloader_protocol.py      | 188 +++++++++++++-
+ tools/firmware-flasher/pmosrec_v3.py               | 100 ++++++++
+ .../tests/test_bootloader_protocol.py              | 160 ++++++++++--
+ tools/firmware-flasher/tests/test_pmosrec_v3.py    |  25 ++
  tools/fwupdate-smoke-test/host-smoke-test.sh       |   2 +-
- 28 files changed, 1319 insertions(+), 107 deletions(-)
+ 41 files changed, 2112 insertions(+), 109 deletions(-)

@@ -12,6 +12,11 @@ from pathlib import Path
 import re
 
 REQUIRED = {
+    # msxx_defconfig disables the parent block-device menu. Kconfig removes
+    # BLK_DEV_RAM and its numeric children unless both parents are enabled
+    # before olddefconfig resolves dependencies.
+    "CONFIG_BLOCK": "y",
+    "CONFIG_BLK_DEV": "y",
     "CONFIG_BLK_DEV_INITRD": "y",
     "CONFIG_BLK_DEV_RAM": "y",
     "CONFIG_BLK_DEV_RAM_COUNT": "1",

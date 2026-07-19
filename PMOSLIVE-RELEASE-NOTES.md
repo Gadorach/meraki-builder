@@ -1,7 +1,22 @@
-# PMOSLIVE mem=120M hardware-test source release
+# PMOSLIVE mem=120M build-fix source release
 
-Date: 2026-07-18
-Status: source-complete and structurally validated; hardware validation and the production GCC 4.7.3/full Buildroot image build remain pending.
+Date: 2026-07-19
+Status: first production-build failures corrected; source-complete and structurally validated. Hardware validation and a rerun of the production GCC 4.7.3/full Buildroot image build remain pending.
+
+## Production-build corrections in buildfix1
+
+- Added a local freestanding `memset` implementation to PMOSLIVE because GCC
+  4.7.3 lowered a zeroing loop to an external libc call while linking with
+  `-nostdlib`.
+- Initialised the manifest-derived `rootfs_size` value before validation to
+  remove GCC 4.7.3's `-Wmaybe-uninitialized` warning.
+- Enabled the parent kernel symbols `CONFIG_BLOCK=y` and `CONFIG_BLK_DEV=y` so
+  Linux `olddefconfig` retains `CONFIG_BLK_DEV_RAM`, `CONFIG_BLK_DEV_RAM_COUNT`,
+  and `CONFIG_BLK_DEV_RAM_SIZE`.
+- Expanded regression coverage to begin from the parent block menus disabled,
+  matching the failed production build.
+
+See `PMOSLIVE-BUILD-FIX-2026-07-19.md` for the failure analysis and rerun notes.
 
 ## Resolved hold items
 
@@ -48,3 +63,8 @@ container files in this session. Therefore the pinned GCC toolchain, Linux
 3.18.123 rebuild, Buildroot rootfs rebuild, and final 16 MiB retail image were not
 produced here. The complete modified source trees and deterministic structural
 artifacts are included for the next production build.
+
+### Build-fix1 Distrobox correction
+
+The complete-build dispatcher and `make distrobox` target now forward forced
+kernel/loader rebuild controls and local RedBoot source-selection variables.

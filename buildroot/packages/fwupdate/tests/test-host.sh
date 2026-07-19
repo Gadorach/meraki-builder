@@ -173,6 +173,7 @@ mkdir -p "$TMP/reset-bin"
 cat >"$TMP/reset-common.sh" <<EOF_RESET_COMMON
 #!/bin/sh
 fw_die() { printf '%s\n' "\$*" >&2; exit 1; }
+is_live_boot() { return 1; }
 need_cmd() { :; }
 check_board() { :; }
 check_mtd_layout() { OVERLAY_MTD=mtd3; }

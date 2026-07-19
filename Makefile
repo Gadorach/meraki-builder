@@ -54,7 +54,8 @@ help:
 	  '  make distclean    Remove .work and artifacts completely' \
 	  '' \
 	  'Useful variables:' \
-	  '  JOBS=8 INCLUDE_UI=1 DONOR_IMAGE=/path/file.bin LOADER_REF=main UI_REF=ms42p-dev' \
+	  '  JOBS=8 INCLUDE_UI=1 REBUILD_KERNEL=1 REBUILD_LOADER=1 CLEAN_KERNEL=1 CLEAN_BUILDROOT=1' \
+	  '  DONOR_IMAGE=/path/file.bin LOADER_REPO_URL=file:///path/meraki-redboot LOADER_REF=main UI_REF=ms42p-dev' \
 	  '  USE_DISTROBOX=1 NONINTERACTIVE=1 AUTO_DOWNLOAD_DONOR=1 LOADER_BUILD_MODE=auto'
 
 all:
@@ -157,7 +158,12 @@ menuconfig: prepare
 	@bash -c 'source ./scripts/common.sh; $(MAKE) -C "$$BUILDROOT_DIR" menuconfig'
 
 distrobox:
-	@./scripts/distrobox-run.sh env INCLUDE_UI="$${INCLUDE_UI:-ask}" CLEAN_BUILDROOT="$${CLEAN_BUILDROOT:-0}" ./scripts/build-all.sh
+	@./scripts/distrobox-run.sh env \
+	  INCLUDE_UI="$${INCLUDE_UI:-ask}" CLEAN_BUILDROOT="$${CLEAN_BUILDROOT:-0}" \
+	  REBUILD_KERNEL="$${REBUILD_KERNEL:-0}" REBUILD_LOADER="$${REBUILD_LOADER:-0}" \
+	  CLEAN_KERNEL="$${CLEAN_KERNEL:-0}" \
+	  LOADER_REPO_URL="$${LOADER_REPO_URL:-https://github.com/Gadorach/meraki-redboot.git}" \
+	  LOADER_REF="$${LOADER_REF:-main}" ./scripts/build-all.sh
 
 clean:
 	@./scripts/clean.sh build

@@ -13,6 +13,9 @@ marker = root / "buildroot/features/web-overlay/etc/postmerkos/features/web-ui"
 configd_dir = root / "buildroot/packages/configd"
 
 assert build_all.count('CLEAN_BUILDROOT="${CLEAN_BUILDROOT:-0}"') >= 2
+for variable in ("REBUILD_KERNEL", "REBUILD_LOADER", "CLEAN_KERNEL", "LOADER_REPO_URL", "LOADER_REF"):
+    token = f'{variable}="${{{variable}:-'
+    assert build_all.count(token) >= 2, f"Distrobox handoff does not preserve {variable}"
 for text in ('.ms42p-built-ui-mode', '.ms42p-configd-build-fingerprint', 'make configd-dirclean', 'run_logged buildroot-configd'):
     assert text in build_rootfs, text
 for text in ('websocket: enabled', 'libwebsockets', 'WebSocket-disabled configd'):

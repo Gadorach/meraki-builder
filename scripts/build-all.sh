@@ -9,12 +9,22 @@ if [[ "${MS42P_IN_DISTROBOX:-0}" != 1 ]]; then
     exec "$SCRIPT_DIR/distrobox-run.sh" env \
       INCLUDE_UI="${INCLUDE_UI:-ask}" \
       CLEAN_BUILDROOT="${CLEAN_BUILDROOT:-0}" \
+      REBUILD_KERNEL="${REBUILD_KERNEL:-0}" \
+      REBUILD_LOADER="${REBUILD_LOADER:-0}" \
+      CLEAN_KERNEL="${CLEAN_KERNEL:-0}" \
+      LOADER_REPO_URL="${LOADER_REPO_URL:-https://github.com/Gadorach/meraki-redboot.git}" \
+      LOADER_REF="${LOADER_REF:-main}" \
       ./scripts/build-all.sh
   elif command -v pacman >/dev/null 2>&1 && command -v distrobox >/dev/null 2>&1; then
     if ask_yes_no "Run the complete firmware build in Ubuntu 22.04 Distrobox?" yes; then
       exec "$SCRIPT_DIR/distrobox-run.sh" env \
         INCLUDE_UI="${INCLUDE_UI:-ask}" \
         CLEAN_BUILDROOT="${CLEAN_BUILDROOT:-0}" \
+        REBUILD_KERNEL="${REBUILD_KERNEL:-0}" \
+        REBUILD_LOADER="${REBUILD_LOADER:-0}" \
+        CLEAN_KERNEL="${CLEAN_KERNEL:-0}" \
+        LOADER_REPO_URL="${LOADER_REPO_URL:-https://github.com/Gadorach/meraki-redboot.git}" \
+        LOADER_REF="${LOADER_REF:-main}" \
         ./scripts/build-all.sh
     fi
     export ALLOW_UNSUPPORTED_HOST_BUILD=1

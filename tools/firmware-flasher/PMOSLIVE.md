@@ -32,6 +32,8 @@ loader bodies copy that shared source-built stage to `0xa7f00000`.
 The builder enforces built-in legacy initrd/RAM-disk and SquashFS-XZ support:
 
 ```text
+CONFIG_BLOCK=y
+CONFIG_BLK_DEV=y
 CONFIG_BLK_DEV_INITRD=y
 CONFIG_BLK_DEV_RAM=y
 CONFIG_BLK_DEV_RAM_COUNT=1

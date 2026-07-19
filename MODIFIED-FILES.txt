@@ -1,3 +1,4 @@
+ M Makefile
  M buildroot/board/meraki/ms220/overlay/etc/fstab
  M buildroot/board/meraki/ms220/overlay/etc/init.d/S01postmerkos-overlay
  M buildroot/board/meraki/ms220/post-build.sh
@@ -10,12 +11,14 @@
  M fwupdate/files/common.sh
  M fwupdate/files/fw_factory_reset
  M fwupdate/files/fw_update
+ M fwupdate/tests/test-host.sh
  M scripts/build-all.sh
  M scripts/build-kernel.sh
  M scripts/build-loader.sh
  M scripts/build-rootfs.sh
  M scripts/common.sh
  M scripts/tests/test-artifact-manifest.py
+ M scripts/tests/test-build-cache-contract.py
  M scripts/tests/test-vendor-modules.sh
  M scripts/verify-inputs.sh
  M scripts/write-artifact-manifest.py
@@ -26,6 +29,12 @@
  M tools/firmware-flasher/tests/test_bootloader_protocol.py
  M tools/firmware-flasher/tests/test_pmosrec_v3.py
  M tools/fwupdate-smoke-test/host-smoke-test.sh
+?? PACKAGE-IDENTITY.txt
+?? PMOSLIVE-BUILD-FIX-2026-07-19.md
+?? PMOSLIVE-BUILD-RERUN-2026-07-19.md
+?? PMOSLIVE-FINAL-TEST-RESULTS.log
+?? PMOSLIVE-MEMORY-MAP.md
+?? PMOSLIVE-RELEASE-NOTES.md
 ?? scripts/configure-liveboot-kernel.py
 ?? scripts/tests/test-liveboot-kernel-config.py
 ?? tools/firmware-flasher/PMOSLIVE.md

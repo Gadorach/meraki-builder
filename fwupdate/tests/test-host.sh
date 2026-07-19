@@ -55,6 +55,47 @@ FWUPDATE_LOG_FILE="$TMP/update.log" \
 FWUPDATE_UPLOAD_DIR="$TMP/uploads" \
 sh -c '. "$1"; check_mtd_layout; [ "$ROOT_MTD" = mtd2 ]; [ "$ROOT_MTD_SIZE" -eq 8388608 ]; [ "$ROOT_MTD_ERASE_SIZE" -eq 65536 ]; [ "$OVERLAY_MTD" = mtd3 ]; [ "$OVERLAY_MTD_SIZE" -eq 5242880 ]; check_full_mtd_layout; [ "$LOADER_MTD" = mtd0 ]; [ "$LOADER_MTD_SIZE" -eq 262144 ]; [ "$KERNEL_MTD" = mtd1 ]; [ "$KERNEL_MTD_SIZE" -eq 2883584 ]' sh "$PKG/files/common.sh"
 
+printf 'console=ttyS0 postmerkos.live=1 root=/dev/ram0\n' > "$TMP/cmdline-live"
+printf 'console=ttyS0 root=/dev/mtdblock2\n' > "$TMP/cmdline-flash"
+FWUPDATE_PROC_CMDLINE="$TMP/cmdline-live" FWUPDATE_LIVE_MARKER="$TMP/no-marker" \
+FWUPDATE_MANIFEST_HELPER="$OUT" FWUPDATE_STATUS_FILE="$TMP/status.json" \
+FWUPDATE_LOG_FILE="$TMP/update.log" FWUPDATE_UPLOAD_DIR="$TMP/uploads" \
+sh -c '. "$1"; is_live_boot' sh "$PKG/files/common.sh"
+if FWUPDATE_PROC_CMDLINE="$TMP/cmdline-flash" FWUPDATE_LIVE_MARKER="$TMP/no-marker" \
+  FWUPDATE_MANIFEST_HELPER="$OUT" FWUPDATE_STATUS_FILE="$TMP/status.json" \
+  FWUPDATE_LOG_FILE="$TMP/update.log" FWUPDATE_UPLOAD_DIR="$TMP/uploads" \
+  sh -c '. "$1"; is_live_boot' sh "$PKG/files/common.sh"; then
+  echo 'normal flash boot was incorrectly detected as PMOSLIVE' >&2
+  exit 1
+fi
+
+cc -std=c99 -Wall -Wextra -Werror -o "$TMP/fwflash" "$PKG/fwflash.c"
+"$TMP/fwflash" --help | grep -q -- '--factory-reset'
+"$TMP/fwflash" --help | grep -q -- '--overlay-only'
+
+# The factory-default JFFS2 seed must contain the upper/work layout required by
+# the /etc and /root overlayfs mounts before the first boot.
+mkdir -p "$TMP/fake-bin"
+cat >"$TMP/fake-bin/mkfs.jffs2" <<'EOF_MKFS'
+#!/bin/sh
+out=
+root=
+while [ "$#" -gt 0 ]; do
+  case "$1" in -o) out=$2; shift 2;; -r) root=$2; shift 2;; *) shift;; esac
+done
+[ -d "$root/.upper/etc" ] && [ -d "$root/.work/etc" ] &&
+[ -d "$root/.upper/root" ] && [ -d "$root/.work/root" ] || exit 9
+python3 - "$out" <<'PY_IMAGE'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]); p.write_bytes(bytes.fromhex('8519') + b'\xff' * (5*1024*1024-2))
+PY_IMAGE
+EOF_MKFS
+chmod +x "$TMP/fake-bin/mkfs.jffs2"
+PATH="$TMP/fake-bin:$PATH" FWUPDATE_MANIFEST_HELPER="$OUT" \
+FWUPDATE_STATUS_FILE="$TMP/status.json" FWUPDATE_LOG_FILE="$TMP/update.log" \
+FWUPDATE_UPLOAD_DIR="$TMP/uploads" sh -c '. "$1"; build_clean_overlay_image "$2/tree" "$2/defaults.jffs2"; [ "$(file_size "$2/defaults.jffs2")" -eq "$FWUPDATE_OVERLAY_SIZE" ]' sh "$PKG/files/common.sh" "$TMP"
+
 cat >"$TMP/test-fwflash-led.c" <<EOF
 #define main fwflash_program_main
 #include "$PKG/fwflash.c"
@@ -100,6 +141,31 @@ assert '${STATUS_LED_PROTOCOL:-plain-bool}' in update
 PYTEST
 
 
+python3 - "$PKG/files/fw_factory_reset" "$PKG/fwflash.c" <<'PY_RESET_CONTRACT'
+from pathlib import Path
+import sys
+script=Path(sys.argv[1]).read_text(); helper=Path(sys.argv[2]).read_text()
+assert 'flash_erase' not in script
+assert 'build_clean_overlay_image' in script
+assert '--factory-reset' in script and '--overlay-backup' in script
+assert 'quiesce_remaining_userspace' in script
+assert 'LED_ANIMATOR_PID' in script
+assert '--status-led-green' in script and '--status-led-orange' in script
+assert 'factory_reset_operation = true' in helper
+assert 'if (factory_reset_operation)' in helper
+assert 'Factory-default overlay verified' in helper
+assert "is_live_boot && fw_die 'factory reset is disabled while running from PMOSLIVE'" in script
+PY_RESET_CONTRACT
+
+python3 - "$PKG/files/fw_update" <<'PY_LIVE_UPDATE_CONTRACT'
+from pathlib import Path
+import sys
+script=Path(sys.argv[1]).read_text()
+assert 'if is_live_boot' in script
+assert 'VERIFY_ONLY' in script and 'DRY_RUN' in script
+assert 'flash writes are disabled while running from PMOSLIVE' in script
+PY_LIVE_UPDATE_CONTRACT
+
 # A button-triggered reset owns the reset indicator before entering the factory
 # reset script.  If an updater wins the common lock race, cleanup must adopt and
 # release that ownership instead of leaving an orphaned animator behind.
@@ -107,6 +173,8 @@ mkdir -p "$TMP/reset-bin"
 cat >"$TMP/reset-common.sh" <<EOF_RESET_COMMON
 #!/bin/sh
 fw_die() { printf '%s\n' "\$*" >&2; exit 1; }
+is_live_boot() { return 1; }
+need_cmd() { :; }
 check_board() { :; }
 check_mtd_layout() { OVERLAY_MTD=mtd3; }
 acquire_lock() { exit 1; }
