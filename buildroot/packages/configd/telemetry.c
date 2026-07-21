@@ -469,6 +469,167 @@ void telemetry_service_io(void) {
   metrics_server_service(&g_snap, &g_health);
 }
 
+/* Build a compact live-telemetry frame from the current in-memory snapshot for
+   the WebSocket graph stream. Raw monotonic counters + a device timestamp; the
+   client derives rates (and uses its own arrival clock for delta-t, since the
+   device clock can be wrong/stepping pre-NTP). Independent of the Prometheus/SNMP
+   exporters. Caller owns the returned object. */
+/* Friendly name for a thermal zone (e.g. "cpu-thermal", "poe-thermal") from its
+   type file, falling back to the zone label. Read only for the live stream so the
+   Prometheus/SNMP temperature labels stay unchanged. */
+static void thermal_zone_name(const char *label, char *out, size_t out_size) {
+  const char *base = getenv("CONFIGD_THERMAL_PATH");
+  if (!base || !*base) base = "/sys/class/thermal";
+  char path[300];
+  snprintf(path, sizeof(path), "%s/%s/type", base, label);
+  FILE *f = fopen(path, "r");
+  if (f) {
+    if (fgets(out, out_size, f)) {
+      out[strcspn(out, "\r\n")] = '\0';
+      fclose(f);
+      if (out[0]) return;
+    } else {
+      fclose(f);
+    }
+  }
+  snprintf(out, out_size, "%s", label);
+}
+
+static void temps_add(struct json_object *temps, const char *name, double c) {
+  struct json_object *t = json_object_new_object();
+  json_object_object_add(t, "name", json_object_new_string(name));
+  json_object_object_add(t, "c", json_object_new_double(c));
+  json_object_array_add(temps, t);
+}
+
+/* Append hwmon sensors (e.g. the tmp411 board sensor) to the stream temps.
+   Read only for the live stream; Prometheus/SNMP temperature labels are unchanged. */
+static void append_hwmon_temps(struct json_object *temps) {
+  const char *base = getenv("CONFIGD_HWMON_PATH");
+  if (!base || !*base) base = "/sys/class/hwmon";
+  DIR *dir = opendir(base);
+  if (!dir) return;
+  struct dirent *entry;
+  while ((entry = readdir(dir))) {
+    if (strncmp(entry->d_name, "hwmon", 5) != 0) continue;
+    char chip[64] = "", path[320];
+    snprintf(path, sizeof(path), "%s/%s/name", base, entry->d_name);
+    FILE *nf = fopen(path, "r");
+    if (nf) { if (fgets(chip, sizeof(chip), nf)) chip[strcspn(chip, "\r\n")] = '\0'; fclose(nf); }
+    for (int i = 1; i <= 8; i++) {
+      snprintf(path, sizeof(path), "%s/%s/temp%d_input", base, entry->d_name, i);
+      FILE *tf = fopen(path, "r");
+      if (!tf) continue;
+      long milli = 0;
+      int ok = fscanf(tf, "%ld", &milli) == 1;
+      fclose(tf);
+      if (!ok) continue;
+      char chan[48] = "", label[128];
+      snprintf(path, sizeof(path), "%s/%s/temp%d_label", base, entry->d_name, i);
+      FILE *lf = fopen(path, "r");
+      if (lf) { if (fgets(chan, sizeof(chan), lf)) chan[strcspn(chan, "\r\n")] = '\0'; fclose(lf); }
+      if (chan[0]) snprintf(label, sizeof(label), "%s %s", chip[0] ? chip : "hwmon", chan);
+      else snprintf(label, sizeof(label), "%s temp%d", chip[0] ? chip : "hwmon", i);
+      temps_add(temps, label, milli / 1000.0);
+    }
+  }
+  closedir(dir);
+}
+
+struct json_object *telemetry_stream_json(void) {
+  struct json_object *data = json_object_new_object();
+  json_object_object_add(data, "ts", json_object_new_int64((int64_t)time(NULL)));
+  json_object_object_add(data, "uptime_s",
+                         json_object_new_int64(g_health.uptime_seconds));
+
+  /* Per-sensor temperatures with friendly names: [{name, c}, ...]. Sources:
+     kernel thermal zones, hwmon chips, and the pd690xx PoE controller(s). */
+  struct json_object *temps = json_object_new_array();
+  for (int i = 0; i < g_health.temp_count && i < METRICS_MAX_TEMPS; i++) {
+    char name[64];
+    thermal_zone_name(g_health.temp_labels[i], name, sizeof(name));
+    temps_add(temps, name, g_health.temps_celsius[i]);
+  }
+  append_hwmon_temps(temps);
+  if (g_health.poe_available) {
+    int controllers = pd690xx_pres_count(&pd690xx);
+    float *junction = get_temp(&pd690xx);
+    if (junction) {
+      for (int i = 0; i < controllers; i++) {
+        char name[24];
+        if (controllers > 1) snprintf(name, sizeof(name), "poe-%d", i + 1);
+        else snprintf(name, sizeof(name), "poe");
+        temps_add(temps, name, junction[i]);
+      }
+      free(junction);
+    }
+  }
+  json_object_object_add(data, "temps", temps);
+
+  if (g_health.poe_available)
+    json_object_object_add(data, "poe_w",
+                           json_object_new_double(g_health.poe_power_watts));
+
+  /* CPU load average (1/5/15 min) from /proc/loadavg. */
+  struct json_object *load = json_object_new_array();
+  const char *loadavg = getenv("CONFIGD_LOADAVG_FILE");
+  if (!loadavg || !*loadavg) loadavg = "/proc/loadavg";
+  FILE *lf = fopen(loadavg, "r");
+  if (lf) {
+    double a = 0, b = 0, c = 0;
+    if (fscanf(lf, "%lf %lf %lf", &a, &b, &c) >= 1) {
+      json_object_array_add(load, json_object_new_double(a));
+      json_object_array_add(load, json_object_new_double(b));
+      json_object_array_add(load, json_object_new_double(c));
+    }
+    fclose(lf);
+  }
+  json_object_object_add(data, "load", load);
+
+  /* Memory from /proc/meminfo (kB); the client derives used %. */
+  const char *meminfo = getenv("CONFIGD_MEMINFO_FILE");
+  if (!meminfo || !*meminfo) meminfo = "/proc/meminfo";
+  FILE *mf = fopen(meminfo, "r");
+  if (mf) {
+    char line[128]; long total = -1, avail = -1; long value;
+    while ((total < 0 || avail < 0) && fgets(line, sizeof(line), mf)) {
+      if (sscanf(line, "MemTotal: %ld kB", &value) == 1) total = value;
+      else if (sscanf(line, "MemAvailable: %ld kB", &value) == 1) avail = value;
+    }
+    fclose(mf);
+    if (total > 0) {
+      json_object_object_add(data, "mem_total_kb", json_object_new_int64(total));
+      if (avail >= 0) json_object_object_add(data, "mem_avail_kb", json_object_new_int64(avail));
+    }
+  }
+
+  struct json_object *ports = json_object_new_array();
+  uint64_t total_rx = 0, total_tx = 0;
+  for (int i = 0; i < g_snap.count && i < PORTSTATS_MAX_PORTS; i++) {
+    const struct port_counters *p = &g_snap.ports[i];
+    if (!p->present) continue;
+    struct json_object *o = json_object_new_object();
+    json_object_object_add(o, "i", json_object_new_int(p->port));
+    json_object_object_add(o, "rxB", json_object_new_int64((int64_t)p->rx_octets));
+    json_object_object_add(o, "txB", json_object_new_int64((int64_t)p->tx_octets));
+    json_object_object_add(o, "rxP", json_object_new_int64((int64_t)p->rx_packets));
+    json_object_object_add(o, "txP", json_object_new_int64((int64_t)p->tx_packets));
+    json_object_object_add(o, "up", json_object_new_int(p->oper == PORT_LINK_UP ? 1 : 0));
+    json_object_object_add(o, "spd", json_object_new_int(p->speed_mbps));
+    if (p->poe_present)
+      json_object_object_add(o, "poeW", json_object_new_double(p->poe_power_watts));
+    json_object_array_add(ports, o);
+    total_rx += p->rx_octets;
+    total_tx += p->tx_octets;
+  }
+  json_object_object_add(data, "ports", ports);
+  struct json_object *total = json_object_new_object();
+  json_object_object_add(total, "rxB", json_object_new_int64((int64_t)total_rx));
+  json_object_object_add(total, "txB", json_object_new_int64((int64_t)total_tx));
+  json_object_object_add(data, "total", total);
+  return data;
+}
+
 void telemetry_shutdown(void) {
   metrics_server_stop();
 }

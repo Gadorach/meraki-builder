@@ -56,6 +56,7 @@ struct per_session_data {
   bool send_initial_config;
   bool send_status;
   bool send_config;
+  bool telemetry_subscribed;
   struct queued_reply *reply_head;
   struct queued_reply *reply_tail;
   char *receive_buffer;
@@ -95,6 +96,8 @@ static struct lws_sorted_usec_list status_sul;
 static struct lws_sorted_usec_list config_sul;
 static struct lws_sorted_usec_list terminal_sul;
 static bool terminal_poll_scheduled;
+static struct lws_sorted_usec_list telemetry_sul;
+static bool telemetry_stream_scheduled;
 static struct lws_context *ws_context;
 static struct lws *upload_owner;
 
@@ -377,6 +380,56 @@ static void queue_response(struct lws *wsi, struct per_session_data *session,
   else session->reply_head = reply;
   session->reply_tail = reply;
   lws_callback_on_writable(wsi);
+}
+
+/* ---- live telemetry graph stream (subscribe-gated, server-initiated push) ---- */
+
+static int telemetry_stream_interval_seconds(void) {
+  const char *value = getenv("CONFIGD_TELEMETRY_STREAM_INTERVAL");
+  int seconds = value && *value ? atoi(value) : 0;
+  return seconds > 0 ? seconds : 2;
+}
+
+static size_t telemetry_subscriber_count(void) {
+  size_t subscribers = 0;
+  for (size_t i = 0; i < client_count; i++) {
+    struct per_session_data *session = lws_wsi_user(clients[i]);
+    if (session && session->telemetry_subscribed) subscribers++;
+  }
+  return subscribers;
+}
+
+/* Build one frame and enqueue it to every subscribed client. */
+static void telemetry_push_subscribers(void) {
+  struct json_object *data = telemetry_stream_json();
+  if (!data) return;
+  for (size_t i = 0; i < client_count; i++) {
+    struct per_session_data *session = lws_wsi_user(clients[i]);
+    if (session && session->telemetry_subscribed)
+      queue_response(clients[i], session, "telemetry", data, NULL);
+  }
+  json_object_put(data);
+}
+
+/* Fires every CONFIGD_TELEMETRY_STREAM_INTERVAL s while at least one client is
+   subscribed; refreshes the Click snapshot then pushes. Stops rescheduling (goes
+   idle, no extra Click reads) once the last subscriber leaves. */
+static void telemetry_stream_cb(struct lws_sorted_usec_list *sul) {
+  if (telemetry_subscriber_count() == 0) {
+    telemetry_stream_scheduled = false;
+    return;
+  }
+  telemetry_tick();
+  telemetry_push_subscribers();
+  lws_sul_schedule(ws_context, 0, sul, telemetry_stream_cb,
+      (lws_usec_t)telemetry_stream_interval_seconds() * LWS_USEC_PER_SEC);
+}
+
+static void telemetry_stream_ensure_scheduled(void) {
+  if (telemetry_stream_scheduled || !ws_context) return;
+  telemetry_stream_scheduled = true;
+  lws_sul_schedule(ws_context, 0, &telemetry_sul, telemetry_stream_cb,
+      (lws_usec_t)telemetry_stream_interval_seconds() * LWS_USEC_PER_SEC);
 }
 
 static void free_replies(struct per_session_data *session) {
@@ -1568,6 +1621,33 @@ static int handle_request(struct lws *wsi, struct per_session_data *session,
     json_object_put(status);
     return 0;
   }
+  if (!strcmp(type, "telemetry_subscribe")) {
+    if (!require_capability(wsi, session, request_id, "status.read")) return 0;
+    session->telemetry_subscribed = true;
+    telemetry_tick();  /* fresh snapshot for the immediate frame */
+    struct json_object *frame = telemetry_stream_json();
+    if (frame) {
+      queue_response(wsi, session, "telemetry", frame, NULL);
+      json_object_put(frame);
+    }
+    telemetry_stream_ensure_scheduled();
+    struct json_object *ack = json_object_new_object();
+    json_object_object_add(ack, "subscribed", json_object_new_boolean(1));
+    json_object_object_add(ack, "interval_s",
+                           json_object_new_int(telemetry_stream_interval_seconds()));
+    queue_response(wsi, session, "ack", ack, request_id);
+    json_object_put(ack);
+    return 0;
+  }
+  if (!strcmp(type, "telemetry_unsubscribe")) {
+    if (!require_capability(wsi, session, request_id, "status.read")) return 0;
+    session->telemetry_subscribed = false;
+    struct json_object *ack = json_object_new_object();
+    json_object_object_add(ack, "subscribed", json_object_new_boolean(0));
+    queue_response(wsi, session, "ack", ack, request_id);
+    json_object_put(ack);
+    return 0;
+  }
   if (!strcmp(type, "get_config")) {
     if (!require_capability(wsi, session, request_id, "config.read")) return 0;
     struct json_object *config = load_config_file();
@@ -1863,7 +1943,9 @@ void ws_shutdown(struct lws_context *context) {
   lws_sul_cancel(&status_sul);
   lws_sul_cancel(&config_sul);
   lws_sul_cancel(&terminal_sul);
+  lws_sul_cancel(&telemetry_sul);
   terminal_poll_scheduled = false;
+  telemetry_stream_scheduled = false;
   firmware_job_cancel();
   for (size_t i = 0; i < client_count; i++) {
     struct per_session_data *session = lws_wsi_user(clients[i]);

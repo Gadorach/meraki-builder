@@ -31,4 +31,9 @@ int telemetry_write_snmpd_env(struct json_object *config, const char *bind_addr)
 /* Host-testable enrichment seam. */
 void telemetry_enrich_port_status(struct portstats_snapshot *snap);
 
+/* Compact live-telemetry frame (temps, load, uptime, PoE, per-port raw counters,
+   totals) for the WebSocket graph stream. Reads the current in-memory snapshot;
+   caller owns the returned json object. */
+struct json_object *telemetry_stream_json(void);
+
 #endif
