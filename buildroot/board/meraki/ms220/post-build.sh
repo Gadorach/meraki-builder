@@ -441,3 +441,12 @@ PY
 fi
 
 find "$TARGET_DIR/etc/init.d" -maxdepth 1 -type f -exec chmod 0755 {} +
+
+# Drop host/debug-only tooling that buildroot installs but the device never uses
+# at runtime, to keep the squashfs within the 8 MiB NOR rootfs region enforced by
+# post-image.sh (0x800000). The flash/update path uses flashcp/dd, not
+# squashfs-tools; strace/lsof are interactive debug aids. Frees ~1.4 MiB.
+for _dbg in usr/bin/strace usr/bin/lsof; do
+    rm -f "$TARGET_DIR/$_dbg"
+done
+rm -rf "$TARGET_DIR/usr/libexec/lzo/examples"
