@@ -435,7 +435,7 @@ cd /tmp || fw_die "cannot change directory to /tmp"
 sync
 
 # Stop processes that may hold files in /etc, /root, or the SquashFS lower layer.
-for proc in configd uhttpd chronyd chrony syslogd klogd crond ntpd dhcpclient; do
+for proc in configd pmweb chronyd chrony syslogd klogd crond ntpd dhcpclient; do
     killall "$proc" >/dev/null 2>&1 || true
 done
 # Stop SSH last. The updater ignores SIGHUP and continues from tmpfs.

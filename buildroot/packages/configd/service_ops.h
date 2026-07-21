@@ -9,4 +9,6 @@ int service_policy_save(struct json_object *policy, char *error, size_t error_si
 int service_action(const char *service, const char *action, char *error, size_t error_size);
 int service_policy_apply(char *error, size_t error_size);
 int service_reconfigure(const char *service, char *error, size_t error_size);
+int service_reconfigure_deferred(const char *service, int delay_ms,
+                                 char *error, size_t error_size);
 #endif

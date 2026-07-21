@@ -1,0 +1,40 @@
+#!/bin/sh
+#
+# Generate a per-device self-signed TLS cert+key on first boot if none exists, so
+# the pmweb front proxy can serve HTTPS (and same-origin wss) out of the box.
+# configd itself stays plain loopback ws; pmweb owns TLS. Stored in /config
+# (JFFS2, persistent) and replaceable from the web UI (configd cert_set /
+# cert_delete). Runs before S16pmweb so pmweb finds the cert at startup.
+#
+CERT_DIR=/config/certs
+CERT=$CERT_DIR/web.crt
+KEY=$CERT_DIR/web.key
+
+start() {
+    [ -x /usr/sbin/gencert ] || return 0
+    [ -f "$CERT" ] && [ -f "$KEY" ] && return 0
+    mkdir -p "$CERT_DIR"
+    chmod 0700 "$CERT_DIR"
+    cn=$(board_data serial 2>/dev/null)
+    [ -n "$cn" ] || cn=$(hostname 2>/dev/null)
+    [ -n "$cn" ] || cn=postmerkos
+    if /usr/sbin/gencert "$CERT" "$KEY" "$cn"; then
+        chmod 0600 "$KEY"
+        chmod 0644 "$CERT"
+        echo "Generated self-signed TLS certificate (CN=$cn)"
+    else
+        echo "TLS certificate generation failed" >&2
+    fi
+}
+
+stop() { /bin/true; }
+restart() { start; }
+
+case "$1" in
+  start) start ;;
+  stop) stop ;;
+  restart|reload) restart ;;
+  *) echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac
+
+exit $?

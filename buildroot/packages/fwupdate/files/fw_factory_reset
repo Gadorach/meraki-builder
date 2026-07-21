@@ -106,7 +106,7 @@ fi
 status_write resetting handoff 25 \
     'Factory-default image prepared; stopping management services'
 trap '' HUP
-for proc in configd uhttpd chronyd chrony syslogd klogd crond ntpd dhcpclient; do
+for proc in configd pmweb chronyd chrony syslogd klogd crond ntpd dhcpclient; do
     killall "$proc" >/dev/null 2>&1 || true
 done
 # Stop SSH last. The reset script ignores SIGHUP and continues from tmpfs.

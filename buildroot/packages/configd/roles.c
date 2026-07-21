@@ -173,7 +173,7 @@ static const char *admin_caps[] = {
   "status.read", "config.read", "firmware.history.read", "ports.write",
   "switching.write", "backup.create", "system.reboot", "system.poweroff",
   "firmware.update", "config.restore", "network.write", "users.manage",
-  "services.manage", "terminal.exec", "system.factory_reset", NULL
+  "services.manage", "terminal.exec", "system.factory_reset", "tls.manage", NULL
 };
 
 static const char *const *capabilities(enum postmerkos_role role) {

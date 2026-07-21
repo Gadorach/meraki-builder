@@ -136,6 +136,19 @@ postmerkosctl_binary="output/target/usr/bin/postmerkosctl"
 [[ -x "$configd_binary" ]] || die "Fresh configd package build did not install /bin/configd"
 [[ -x "$postmerkosctl_binary" ]] || die "Fresh configd package build did not install /usr/bin/postmerkosctl"
 
+# pmweb (the TLS front proxy) is likewise a fixed-version local package: Buildroot's
+# stamp logic won't rebuild it when only the source changes, so force a clean
+# rebuild and verify the installed binary. Only when the web UI (hence pmweb) is enabled.
+if grep -q '^BR2_PACKAGE_PMWEB=y$' .config 2>/dev/null; then
+  log "Rebuilding pmweb from synchronized local sources"
+  make pmweb-dirclean
+  rm -f output/target/usr/sbin/pmweb
+  run_logged buildroot-pmweb \
+    make -j"$JOBS" BR2_DL_DIR="$BUILDROOT_DL_DIR" \
+    BR2_PRIMARY_SITE="https://sources.buildroot.net" pmweb
+  [[ -x output/target/usr/sbin/pmweb ]] || die "Fresh pmweb package build did not install /usr/sbin/pmweb"
+fi
+
 # Do not use grep -q in producer pipelines while pipefail is enabled. grep -q
 # closes the pipe after the first match and can make strings/readelf exit with
 # SIGPIPE (141), turning a successful feature check into a false failure.

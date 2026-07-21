@@ -27,7 +27,7 @@ port_listening() {
         awk -v suffix=":$hex" '
           $4 == "0A" && substr($2, length($2)-length(suffix)+1) == suffix {
             split($2, address, ":");
-            if (address[1] == "00000000" || address[1] == "00000000000000000000000000000000") found=1
+            if (address[1] == "00000000" || address[1] == "0100007F" || address[1] == "00000000000000000000000000000000" || address[1] == "00000000000000000000000001000000") found=1
           }
           END { exit found ? 0 : 1 }' "$table" && return 0
     done

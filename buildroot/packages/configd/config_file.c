@@ -45,7 +45,7 @@ static int copy_file_atomic(const char *source, const char *destination,
   if (in < 0) return -errno;
   int out = open(temp, O_WRONLY | O_CREAT | O_EXCL, mode);
   if (out < 0) { int rc = -errno; close(in); return rc; }
-  (void)fchown(out, uid, gid);
+  if (fchown(out, uid, gid) != 0) { /* best-effort ownership; ignore */ }
   char buffer[4096];
   int rc = 0;
   for (;;) {
@@ -108,7 +108,7 @@ int save_config_file(struct json_object *json, char *error, size_t error_size) {
 
   int fd = open(temp_path, O_WRONLY | O_CREAT | O_EXCL, mode);
   if (fd < 0) { rc = -errno; goto done; }
-  (void)fchown(fd, uid, gid);
+  if (fchown(fd, uid, gid) != 0) { /* best-effort ownership; ignore */ }
   const char *text = json_object_to_json_string_ext(
       json, JSON_C_TO_STRING_SPACED | JSON_C_TO_STRING_PRETTY);
   size_t remaining = strlen(text); const char *cursor = text;

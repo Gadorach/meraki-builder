@@ -41,7 +41,7 @@ assert "normalize_future_git_timestamps" in common
 assert "LOADER_SOURCE_SELECTION_RECORD" in common and "LOADER_SOURCE_SELECTION_RECORD" in prepare
 assert "RESOLVED_GIT_SYMBOLIC_REF" not in build_loader
 assert "source provenance record is missing" in build_loader
-assert "VITE_CONFIGD_WS_PORT=4001 npm run build" in build_ui
+assert "same-origin /ws WebSocket path" in build_ui
 assert "while IFS='=' read -r name _" in build_ui
 
 print("authoritative meraki-redboot/postmerkos-ui source policy passed")

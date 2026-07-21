@@ -1,6 +1,7 @@
 #include "websocket.h"
 #include <libwebsockets.h>
 #include "auth.h"
+#include "cert.h"
 #include "config_apply.h"
 #include "config_file.h"
 #include "compatibility.h"
@@ -1490,6 +1491,92 @@ static int handle_request(struct lws *wsi, struct per_session_data *session,
     char error[256]={0};if(compatibility_acknowledge(error,sizeof(error))!=0){queue_bad_request(wsi,session,request_id,error);return 0;}
     struct json_object *ack=json_object_new_object();json_object_object_add(ack,"message",json_object_new_string("Compatibility notice dismissed for this firmware"));queue_response(wsi,session,"ack",ack,request_id);json_object_put(ack);refresh_status_cache(true);return 0;
   }
+  if (!strcmp(type, "cert_get")) {
+    if (!require_capability(wsi, session, request_id, "tls.manage")) return 0;
+    struct cert_info ci;
+    struct json_object *data = json_object_new_object();
+    int present = cert_read_info(ws_tls_cert_path(), &ci) == 0;
+    json_object_object_add(data, "present", json_object_new_boolean(present));
+    if (present) {
+      json_object_object_add(data, "subject", json_object_new_string(ci.subject));
+      json_object_object_add(data, "issuer", json_object_new_string(ci.issuer));
+      json_object_object_add(data, "fingerprint_sha256",
+                             json_object_new_string(ci.fingerprint));
+      json_object_object_add(data, "not_before", json_object_new_string(ci.not_before));
+      json_object_object_add(data, "not_after", json_object_new_string(ci.not_after));
+      json_object_object_add(data, "self_signed",
+                             json_object_new_boolean(ci.self_signed));
+    }
+    /* Report whether the on-disk cert+key actually form a usable pair -- i.e.
+       whether pmweb will serve HTTPS. A parseable cert alone is not enough; a
+       stale/mismatched pair means pmweb falls back to plain HTTP. */
+    char cert_err[256] = {0};
+    int valid_pair =
+        cert_check_pair_files(ws_tls_cert_path(), ws_tls_key_path(), cert_err,
+                              sizeof(cert_err)) == 0;
+    json_object_object_add(data, "valid_pair", json_object_new_boolean(valid_pair));
+    /* "will pmweb serve HTTPS on (re)start", not "the live listener is HTTPS right
+       now" -- the UI keys off valid_pair; this is the same signal, named honestly. */
+    json_object_object_add(data, "https_available", json_object_new_boolean(valid_pair));
+    if (!valid_pair)
+      json_object_object_add(data, "error", json_object_new_string(cert_err));
+    queue_response(wsi, session, "cert", data, request_id);
+    json_object_put(data);
+    return 0;
+  }
+  if (!strcmp(type, "cert_set")) {
+    if (!require_capability(wsi, session, request_id, "tls.manage")) return 0;
+    struct json_object *data = request_data_object(message);
+    const char *cert = object_string(data, "cert");
+    const char *key = object_string(data, "key");
+    if (!cert || !*cert || !key || !*key) {
+      queue_bad_request(wsi, session, request_id,
+                        "certificate and private key are required");
+      return 0;
+    }
+    char err[256] = {0};
+    if (cert_validate_pair_pem(cert, key, err, sizeof(err)) != 0) {
+      queue_bad_request(wsi, session, request_id, err);
+      return 0;
+    }
+    if (cert_install_pair_pem(ws_tls_cert_path(), ws_tls_key_path(), cert, key) != 0) {
+      queue_bad_request(wsi, session, request_id, "failed to store certificate");
+      return 0;
+    }
+    /* ACK first: the restart below bounces pmweb, which is proxying THIS
+       connection, so the reply must be queued before the restart is scheduled. */
+    struct json_object *ack = json_object_new_object();
+    json_object_object_add(ack, "message", json_object_new_string(
+        "Certificate installed; the secure connection will reconnect."));
+    queue_response(wsi, session, "ack", ack, request_id);
+    json_object_put(ack);
+    char serr[256] = {0};
+    if (service_reconfigure_deferred("web", 500, serr, sizeof(serr)) != 0)
+      websocket_log("cert_set: failed to schedule pmweb restart: %s", serr);
+    return 0;
+  }
+  if (!strcmp(type, "cert_delete")) {
+    if (!require_capability(wsi, session, request_id, "tls.manage")) return 0;
+    char cn[256] = "postmerkos";
+    if (gethostname(cn, sizeof(cn) - 1) != 0) snprintf(cn, sizeof(cn), "postmerkos");
+    cn[sizeof(cn) - 1] = '\0';
+    if (cert_generate_self_signed(ws_tls_cert_path(), ws_tls_key_path(), cn) != 0) {
+      queue_bad_request(wsi, session, request_id,
+                        "failed to generate self-signed certificate");
+      return 0;
+    }
+    /* ACK first, then bounce pmweb out-of-band (see cert_set above). */
+    struct json_object *ack = json_object_new_object();
+    json_object_object_add(ack, "message", json_object_new_string(
+        "Reverted to a self-signed certificate; the secure connection will reconnect."));
+    queue_response(wsi, session, "ack", ack, request_id);
+    json_object_put(ack);
+    char serr[256] = {0};
+    if (service_reconfigure_deferred("web", 500, serr, sizeof(serr)) != 0)
+      websocket_log("cert_delete: failed to schedule pmweb restart: %s", serr);
+    return 0;
+  }
+
   if (!strcmp(type, "system_identity_get")) {
     if (!require_capability(wsi, session, request_id, "status.read")) return 0;
     struct json_object *data=system_identity_status_json();
@@ -1825,10 +1912,22 @@ static const struct lws_protocols protocols[] = {
   LWS_PROTOCOL_LIST_TERM
 };
 
+const char *ws_tls_cert_path(void) {
+  const char *p = getenv("CONFIGD_TLS_CERT");
+  return p && *p ? p : "/config/certs/web.crt";
+}
+const char *ws_tls_key_path(void) {
+  const char *p = getenv("CONFIGD_TLS_KEY");
+  return p && *p ? p : "/config/certs/web.key";
+}
+
 struct lws_context *ws_init(int port) {
   struct lws_context_creation_info info;
   memset(&info, 0, sizeof(info));
   info.port = port;
+  /* Bind loopback only: the pmweb TLS front proxies external wss to this plain
+     ws; nothing external reaches configd's WS directly. */
+  info.iface = "127.0.0.1";
   info.protocols = protocols;
   info.options = LWS_SERVER_OPTION_HTTP_HEADERS_SECURITY_BEST_PRACTICES_ENFORCE |
                  LWS_SERVER_OPTION_ALLOW_LISTEN_SHARE;

@@ -440,4 +440,11 @@ path.write_text(path.read_text().replace('__SALT__', sys.argv[2]))
 PY
 fi
 
+# The single-origin TLS work replaced uhttpd with pmweb. An incremental buildroot
+# target can retain the old artifacts (removing them from the overlay/package does
+# not delete an already-baked copy), which would run a stale S16uhttpd alongside
+# pmweb. Drop them explicitly so the migration is clean on incremental builds.
+rm -f "$TARGET_DIR/etc/init.d/S16uhttpd" \
+      "$TARGET_DIR/usr/bin/uhttpd" "$TARGET_DIR/usr/sbin/uhttpd"
+
 find "$TARGET_DIR/etc/init.d" -maxdepth 1 -type f -exec chmod 0755 {} +

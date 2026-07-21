@@ -3,7 +3,7 @@
 OLD_ADDRESS=${1:-unknown}
 NEW_ADDRESS=${2:-unknown}
 SOURCE=${3:-unknown}
-WEB_INIT=${POSTMERKOS_WEB_INIT:-/etc/init.d/S16uhttpd}
+WEB_INIT=${POSTMERKOS_WEB_INIT:-/etc/init.d/S16pmweb}
 LOGFILE=/tmp/network-rebind.log
 
 log() {

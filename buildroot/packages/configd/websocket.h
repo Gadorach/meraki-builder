@@ -8,7 +8,11 @@
 
 struct lws_context;
 
+/* configd serves plain ws on loopback; the pmweb TLS front proxies external wss. */
 struct lws_context *ws_init(int port);
+/* Where the cert lives (owned by configd's cert RPCs, served by pmweb). */
+const char *ws_tls_cert_path(void);
+const char *ws_tls_key_path(void);
 void ws_schedule_timers(struct lws_context *context, int status_interval);
 void mark_clients_pending(void);
 int ws_service_once(struct lws_context *context, int timeout_ms);

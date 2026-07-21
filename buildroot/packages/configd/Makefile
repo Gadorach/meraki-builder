@@ -13,16 +13,22 @@ BASE_SRCS = main.c click_port.c click_global.c status.c json_util.c \
 
 ifeq ($(ENABLE_WEBSOCKET),1)
 override CPPFLAGS += -DCONFIGD_ENABLE_WEBSOCKET=1
-LDLIBS += -lwebsockets
-SRCS = $(BASE_SRCS) websocket.c
+# TLS (HTTPS/wss) rides with the web build: libwebsockets serves wss and cert.c
+# provides the mbedTLS cert primitives shared with the gencert boot helper. The
+# ENABLE_WEBSOCKET=0 variant (and tests/test-host.sh) stay free of mbedTLS.
+LDLIBS += -lwebsockets -lmbedtls -lmbedx509 -lmbedcrypto
+SRCS = $(BASE_SRCS) websocket.c cert.c
+EXTRA_TARGETS = gencert
 else
 SRCS = $(BASE_SRCS) websocket_disabled.c
+EXTRA_TARGETS =
 endif
 
+MBEDTLS_LIBS = -lmbedtls -lmbedx509 -lmbedcrypto
 SUPPORT_SRCS = $(PD690XX_DIR)/libpd690xx.c $(POSTMERKOS_DIR)/libpostmerkos.c
 
 .PHONY: all clean test-host
-all: configd postmerkosctl
+all: configd postmerkosctl $(EXTRA_TARGETS)
 
 configd: $(SRCS) $(SUPPORT_SRCS)
 	$(CC) $(CPPFLAGS) $(INCLUDES) $(CFLAGS) -o $@ $(SRCS) $(SUPPORT_SRCS) $(LDFLAGS) $(LDLIBS)
@@ -30,8 +36,12 @@ configd: $(SRCS) $(SUPPORT_SRCS)
 postmerkosctl: postmerkosctl.c socket_io.c socket_io.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ postmerkosctl.c socket_io.c $(LDFLAGS) -ljson-c
 
+# Standalone self-signed cert generator run at boot (S13postmerkos-tls).
+gencert: gencert.c cert.c cert.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ gencert.c cert.c $(LDFLAGS) $(MBEDTLS_LIBS)
+
 test-host:
 	./tests/test-host.sh
 
 clean:
-	rm -f configd postmerkosctl *.o
+	rm -f configd postmerkosctl gencert *.o

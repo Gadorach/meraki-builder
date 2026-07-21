@@ -1,0 +1,69 @@
+#!/bin/sh
+#
+# pmweb — single-origin TLS front: serves /www over HTTPS and reverse-proxies the
+# management WebSocket (/ws) to configd on 127.0.0.1:4001. pmweb reads its config
+# from env (defaults: cert /config/certs/web.{crt,key}, root /www,
+# backend ws://127.0.0.1:4001, ports 443/80). With no *valid* cert/key pair it
+# falls back to HTTP on :80 that still serves the UI and proxies /ws, so
+# management stays reachable until a cert is installed.
+#
+DAEMON=/usr/sbin/pmweb
+PIDFILE=/var/run/pmweb.pid
+LOGFILE=/tmp/pmweb.log
+
+pid_alive() {
+    [ -f "$PIDFILE" ] || return 1
+    kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null
+}
+
+# Is any socket LISTENing on the given decimal port? (state 0A in /proc/net/tcp*,
+# local address ends in :<port-in-hex>). Covers 0.0.0.0 and ::.
+port_listening() {
+    hexport=$(printf '%04X' "$1")
+    awk -v p=":$hexport" '$2 ~ p"$" && $4 == "0A" { f=1 } END { exit f?0:1 }' \
+        /proc/net/tcp /proc/net/tcp6 2>/dev/null
+}
+
+start() {
+    printf 'Starting postmerkOS web interface: '
+    [ -x "$DAEMON" ] || { echo 'FAIL (missing pmweb)'; return 1; }
+    [ -f /www/index.html ] || { echo 'FAIL (missing /www/index.html)'; return 1; }
+    mkdir -p /var/run
+    touch "$LOGFILE"
+    start-stop-daemon -S -q -b -m -p "$PIDFILE" -x "$DAEMON" >>"$LOGFILE" 2>&1
+    rc=$?
+    if [ "$rc" -ne 0 ]; then echo FAIL; tail -n 20 "$LOGFILE"; return "$rc"; fi
+    # start-stop-daemon -b reports success once it forks; confirm pmweb actually
+    # stayed up and bound a serving port (it exits non-zero if the primary
+    # listener can't bind). pmweb serves :443 (valid cert) or :80 (fallback).
+    sleep 1
+    if ! pid_alive; then echo 'FAIL (pmweb exited at startup)'; tail -n 20 "$LOGFILE"; return 1; fi
+    if port_listening 443 || port_listening 80; then
+        echo OK; return 0
+    fi
+    echo 'FAIL (pmweb not listening on :443 or :80)'; tail -n 20 "$LOGFILE"; return 1
+}
+
+stop() {
+    printf 'Stopping postmerkOS web interface: '
+    start-stop-daemon -K -q -p "$PIDFILE" -x "$DAEMON" 2>/dev/null
+    rm -f "$PIDFILE"
+    echo OK
+}
+
+rebind() {
+    echo "Rebinding postmerkOS web interface: ${1:-?} -> ${2:-?}"
+    stop
+    sleep 1
+    start
+}
+
+case "$1" in
+    start) start ;;
+    stop) stop ;;
+    restart|reload) stop; sleep 1; start ;;
+    rebind) shift; rebind "$@" ;;
+    *) echo "Usage: $0 {start|stop|restart|reload|rebind}"; exit 1 ;;
+esac
+
+exit $?

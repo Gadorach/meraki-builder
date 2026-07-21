@@ -6,20 +6,36 @@ on:
       - gh-pages
 jobs:
   validate:
-    runs-on: ubuntu-latest
+    # Pin to 22.04: its libmbedtls-dev is mbedTLS 2.28, matching the target
+    # (buildroot) ABI. ubuntu-latest (24.04) ships mbedTLS 3.x, whose renamed/
+    # extra-arg APIs (mbedtls_sha256_ret, pk_parse_keyfile, pk_check_pair) break
+    # the configd + pmweb compiles that target 2.28.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - name: Install host-test dependencies
         run: >-
           sudo apt-get update && sudo apt-get install -y
           build-essential pkg-config libjson-c-dev libcrypt-dev
-          libwebsockets-dev python3
+          libwebsockets-dev libmbedtls-dev python3
       - name: Compile production configd variants
         run: |
           make -C buildroot/packages/configd clean
           make -C buildroot/packages/configd CFLAGS='-O2 -Wall -Wextra -Werror'
           make -C buildroot/packages/configd clean
           make -C buildroot/packages/configd ENABLE_WEBSOCKET=0 CFLAGS='-O2 -Wall -Wextra -Werror'
+      - name: Compile pmweb (mongoose + mbedTLS TLS front proxy)
+        run: |
+          set -euo pipefail
+          # Keep this in sync with the mongoose version buildroot ships.
+          MG_VERSION=7.8
+          work="$(mktemp -d)"
+          curl -fsSL "https://raw.githubusercontent.com/cesanta/mongoose/${MG_VERSION}/mongoose.h" \
+            -o "$work/mongoose.h"
+          # Compile-only (mongoose.c is linked in the image build); this catches
+          # API-usage and mbedTLS-call regressions in pmweb.c under -Werror.
+          cc -I"$work" -Wall -Wextra -Werror \
+            -c buildroot/packages/pmweb/pmweb.c -o "$work/pmweb.o"
       - name: Compile and test configd
         run: make test-configd
       - name: Test firmware tooling

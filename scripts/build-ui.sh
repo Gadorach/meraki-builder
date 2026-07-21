@@ -48,7 +48,7 @@ done < <(env)
 (
   cd "$UI_DIR"
   npm_config_cache="$DOWNLOAD_DIR/npm-cache" npm ci --no-audit --no-fund
-  VITE_CONFIGD_WS_PORT=4001 npm run build
+  npm run build
 )
 
 [[ -f "$UI_DIR/build/index.html" ]] || die "UI build did not produce build/index.html"
@@ -76,11 +76,13 @@ Path(out).write_text(json.dumps({
     "resolution": "authoritative-git",
 }, indent=2, sort_keys=True) + "\n")
 PY_UI
-if grep -R -a -q '14001' "$BUILD_DIR/postmerkos-ui"; then
-  die "production UI contains an unexpected development WebSocket port"
+# Single-origin: the UI connects same-origin to /ws (proxied by pmweb) using the
+# configd-ws subprotocol; it no longer hardcodes the :4001 port.
+if ! grep -R -a -q 'configd-ws' "$BUILD_DIR/postmerkos-ui"; then
+  die "production UI does not contain the configd-ws WebSocket subprotocol"
 fi
-if ! grep -R -a -q '4001' "$BUILD_DIR/postmerkos-ui"; then
-  die "production UI does not contain the required configd WebSocket port 4001"
+if ! grep -R -a -q '/ws' "$BUILD_DIR/postmerkos-ui"; then
+  die "production UI does not contain the same-origin /ws WebSocket path"
 fi
 find "$BUILD_DIR/postmerkos-ui" -type f -print0 | sort -z | xargs -0 sha256sum \
   > "$ARTIFACTS_DIR/ui-files.sha256"

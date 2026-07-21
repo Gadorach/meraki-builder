@@ -14,6 +14,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #define SERVICE_POLICY_PATH "/config/postmerkos/services.json"
@@ -128,7 +129,7 @@ static bool process_running(const char *name);
 
 static const char *service_pattern(const char *service) {
   if (!strcmp(service, "ssh")) return "dropbear";
-  if (!strcmp(service, "web")) return "uhttpd";
+  if (!strcmp(service, "web")) return "pmweb";
   if (!strcmp(service, "chrony")) return "chrony";
   if (!strcmp(service, "mdns")) return "avahi";
   if (!strcmp(service, "snmp")) return "snmpd";   /* matches S16snmpd init script */
@@ -164,7 +165,7 @@ static int find_init_script(const char *pattern, char *path, size_t path_size) {
 
 static const char *service_process_name(const char *service) {
   if (!strcmp(service, "ssh")) return "dropbear";
-  if (!strcmp(service, "web")) return "uhttpd";
+  if (!strcmp(service, "web")) return "pmweb";
   if (!strcmp(service, "chrony")) return "chronyd";
   if (!strcmp(service, "mdns")) return "avahi-daemon";
   if (!strcmp(service, "snmp")) return "mini-snmpd";
@@ -212,6 +213,46 @@ int service_reconfigure(const char *service, char *error, size_t error_size) {
   int rc = desired ? service_action(service, "restart", error, error_size) : 0;
   json_object_put(policy);
   return rc;
+}
+
+/* Restart a service out-of-band, after a short delay, in a detached grandchild.
+   Needed when the *caller itself is proxied through the service being restarted*
+   (cert_set/cert_delete travel over pmweb): a synchronous restart tears down the
+   connection before the ACK is flushed. We decide the desired state now (cheap,
+   in-process) and only schedule a restart if the service should be running; the
+   delay lets configd flush the queued ACK first. Returns 0 if scheduled or not
+   needed, negative on failure to resolve/spawn. */
+int service_reconfigure_deferred(const char *service, int delay_ms,
+                                 char *error, size_t error_size) {
+  const char *pattern = service ? service_pattern(service) : NULL;
+  if (!pattern) { set_error(error, error_size, "unknown service"); return -EINVAL; }
+
+  struct json_object *policy = service_policy_load();
+  if (!policy) { set_error(error, error_size, "service policy unavailable"); return -ENOENT; }
+  struct json_object *entry = member(policy, service);
+  bool desired = bool_member(entry, "enabled", true) &&
+                 bool_member(entry, "autostart", true);
+  json_object_put(policy);
+  if (!desired) return 0;  /* nothing to restart */
+
+  char path[256];
+  int rc = find_init_script(pattern, path, sizeof(path));
+  if (rc != 0) { set_error(error, error_size, "service init script is not installed"); return rc; }
+
+  pid_t child = fork();
+  if (child < 0) { set_error(error, error_size, "failed to fork restart helper"); return -errno; }
+  if (child == 0) {
+    /* Detach so configd never waits on us and we survive the caller returning. */
+    setsid();
+    if (fork() != 0) _exit(0);
+    struct timespec ts = { delay_ms / 1000, (long)(delay_ms % 1000) * 1000000L };
+    nanosleep(&ts, NULL);
+    execl(path, path, "restart", (char *)NULL);
+    _exit(127);
+  }
+  /* Reap the immediate child (it exits as soon as it spawns the grandchild). */
+  while (waitpid(child, NULL, 0) < 0) if (errno != EINTR) break;
+  return 0;
 }
 
 static bool process_running(const char *name) {
@@ -315,7 +356,7 @@ struct json_object *service_status_json(void) {
   struct json_object *policy = service_policy_load();
   struct json_object *root = json_object_new_object();
   const char *names[] = {"ssh", "web", "chrony", "mdns"};
-  const char *processes[] = {"dropbear", "uhttpd", "chronyd", "avahi-daemon"};
+  const char *processes[] = {"dropbear", "pmweb", "chronyd", "avahi-daemon"};
   for (size_t i = 0; i < 4; i++) {
     struct json_object *entry = member(policy, names[i]);
     struct json_object *status = json_object_new_object();

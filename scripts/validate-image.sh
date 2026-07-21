@@ -55,7 +55,7 @@ required=(
   usr/sbin/postmerkos-configd-supervisor
 )
 if bool_enabled "${INCLUDE_UI:-0}"; then
-  required+=(www/index.html usr/bin/uhttpd etc/init.d/S16uhttpd \
+  required+=(www/index.html usr/sbin/pmweb etc/init.d/S16pmweb \
     usr/sbin/postmerkos-network-rebind etc/postmerkos/features/web-ui)
 fi
 for path in "${required[@]}"; do
@@ -67,15 +67,15 @@ python3 "$VENDOR_MODULE_TOOL" verify "$VERIFY_DIR/lib/modules" \
 
 
 if bool_enabled "${INCLUDE_UI:-0}"; then
-  for path in bin/configd usr/bin/uhttpd etc/init.d/S15configd \
+  for path in bin/configd usr/sbin/pmweb etc/init.d/S15configd \
     usr/sbin/postmerkos-configd-supervisor \
-      etc/init.d/S16uhttpd usr/sbin/postmerkos-network-rebind; do
+      etc/init.d/S16pmweb usr/sbin/postmerkos-network-rebind; do
     [[ -x "$VERIFY_DIR/$path" ]] || \
       die "Rootfs verification failed: /$path is not executable"
   done
 
   grep -R -a -q 'configd-ws' "$VERIFY_DIR/www" || die "Web UI lacks configd-ws protocol marker"
-  grep -R -a -q '4001' "$VERIFY_DIR/www" || die "Web UI lacks configd WebSocket port 4001"
+  grep -R -a -q '/ws' "$VERIFY_DIR/www" || die "Web UI lacks the same-origin /ws WebSocket path"
   grep -Fq 'management-health --quiet' "$VERIFY_DIR/etc/init.d/S15configd" || \
     die "configd init lacks the WebSocket hello health contract"
   grep -Fq 'postmerkOS management: restarting configd' \
@@ -89,6 +89,17 @@ if bool_enabled "${INCLUDE_UI:-0}"; then
   }
   readelf -d "$VERIFY_DIR/bin/configd" | grep -F 'libwebsockets' >/dev/null || \
     die "Web image configd is not linked against libwebsockets"
+  # pmweb must terminate TLS with mbedTLS (via mongoose), never OpenSSL.
+  # mongoose is statically linked (libmongoose.a) so it has no NEEDED entry --
+  # assert it via the embedded build marker instead. mbedTLS is dynamic
+  # (libmbedtls.so.N). Match the OpenSSL SONAMEs specifically (libssl.so /
+  # libcrypto.so) so mbedTLS's own libmbedcrypto.so does NOT trip the assertion.
+  strings "$VERIFY_DIR/usr/sbin/pmweb" | grep -qi 'mongoose' || \
+    die "pmweb does not embed mongoose"
+  readelf -d "$VERIFY_DIR/usr/sbin/pmweb" | grep -F 'libmbedtls' >/dev/null || \
+    die "pmweb is not linked against mbedTLS"
+  ! readelf -d "$VERIFY_DIR/usr/sbin/pmweb" | grep -Ei 'libssl\.so|libcrypto\.so' >/dev/null || \
+    die "pmweb unexpectedly links OpenSSL (expected mbedTLS only)"
   grep -Fq 'web image contains WebSocket-disabled configd' \
     "$VERIFY_DIR/etc/init.d/S15configd" || \
     die "configd init does not fail closed for a WebSocket-disabled web image"
@@ -117,7 +128,7 @@ for command in curl mkfs.jffs2 hexdump sha256sum fuser mountpoint head dd awk se
 done
 
 if ! bool_enabled "${INCLUDE_UI:-0}"; then
-  [[ ! -e "$VERIFY_DIR/etc/init.d/S16uhttpd" ]] || die "Base image unexpectedly contains S16uhttpd"
+  [[ ! -e "$VERIFY_DIR/etc/init.d/S16pmweb" ]] || die "Base image unexpectedly contains S16pmweb"
   [[ ! -e "$VERIFY_DIR/etc/postmerkos/features/web-ui" ]] || die "Base image unexpectedly requires WebSocket service"
   strings "$VERIFY_DIR/bin/configd" | grep -Fx 'websocket: disabled' >/dev/null || \
     die "Base image configd unexpectedly includes WebSocket support"

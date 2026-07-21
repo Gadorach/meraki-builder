@@ -1,0 +1,10 @@
+config BR2_PACKAGE_PMWEB
+	bool "pmweb single-origin TLS front"
+	depends on !BR2_STATIC_LIBS # mongoose/mbedtls dynamic
+	select BR2_PACKAGE_MONGOOSE
+	select BR2_PACKAGE_MBEDTLS
+	help
+	  postmerkOS single-origin TLS front proxy. Terminates HTTPS on :443,
+	  serves the static web UI, and reverse-proxies the management WebSocket
+	  (path /ws) to configd's plain loopback ws on 127.0.0.1:4001. Redirects
+	  :80 to https; serves plain HTTP if no certificate is present.

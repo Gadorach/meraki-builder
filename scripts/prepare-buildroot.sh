@@ -177,7 +177,10 @@ set_bool('BR2_PACKAGE_LINUX_PAM', False)
 set_bool('BR2_PACKAGE_FLEX', False)
 set_bool('BR2_TOOLCHAIN_BUILDROOT_WCHAR', False)
 set_bool('BR2_TOOLCHAIN_BUILDROOT_LOCALE', False)
-set_bool('BR2_PACKAGE_UHTTPD', include_ui)
+# Single-origin TLS: pmweb (mongoose + mbedTLS) is the HTTPS front and WS proxy;
+# uhttpd is no longer used. pmweb selects mongoose + mbedtls via its Config.in.
+set_bool('BR2_PACKAGE_UHTTPD', False)
+set_bool('BR2_PACKAGE_PMWEB', include_ui)
 set_bool('BR2_PACKAGE_STATUS', include_status)
 p.write_text(s)
 PY
@@ -218,7 +221,7 @@ if grep -q '^BR2_PACKAGE_JQ=y$' "$CONFIG"; then die "Buildroot unexpectedly reta
 ! grep -q '^BR2_TOOLCHAIN_BUILDROOT_WCHAR=y$' "$CONFIG" || die "uClibc wchar support must remain disabled for the compact image"
 ! grep -q '^BR2_TOOLCHAIN_BUILDROOT_LOCALE=y$' "$CONFIG" || die "uClibc locale support must remain disabled for the compact image"
 if (( INCLUDE_UI_VALUE )); then
-  grep -q '^BR2_PACKAGE_UHTTPD=y$' "$CONFIG" || die "Buildroot did not retain UHTTPD"
+  grep -q '^BR2_PACKAGE_PMWEB=y$' "$CONFIG" || die "Buildroot did not retain pmweb"
 fi
 
 cat > "$STATE_FILE" <<EOF_STATE
